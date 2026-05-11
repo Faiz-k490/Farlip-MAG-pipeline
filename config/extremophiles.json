@@ -1,0 +1,28 @@
+{
+  "$schema_version": "1.0",
+  "$description": "Extremophile MAG sources. 'bioprojects' = enumerable batches (every assembly under the project is pulled). 'individual_accessions' = one-off assembly accessions. 'cave_arctic_pending' = placeholder list awaiting Dr. Barton's accession numbers; populate this in place when received - no code changes required.",
+  "bioprojects": [
+    {
+      "accession": "PRJEB59431",
+      "source": "ENA",
+      "label": "CCAMBIO_polar_mats",
+      "submitter": "Finnish Environment Institute",
+      "first_public": "2023-02-03",
+      "expected_assembly_count": 37,
+      "notes": "Polar cyanobacterial MAGs from Arctic, sub-Antarctic, Antarctic microbial mats. Pessi et al. 2023, Microbial Genomics 9:mgen001001."
+    }
+  ],
+  "individual_accessions": [],
+  "cave_arctic_pending": [
+    {
+      "$comment": "TEMPLATE - leave empty until Dr. Barton supplies accessions. Example shape:",
+      "$example": {
+        "accession": "GCA_XXXXXXXXX.X",
+        "source": "NCBI",
+        "label": "cave_sample_descriptor",
+        "biome": "cave",
+        "notes": "Provided by Dr. Barton on YYYY-MM-DD"
+      }
+    }
+  ]
+}

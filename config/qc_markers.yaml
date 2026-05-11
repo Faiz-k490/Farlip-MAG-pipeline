@@ -1,0 +1,56 @@
+# Single-copy ortholog (SCO) marker HMMs for genome-quality assessment.
+#
+# The Phase 3 quality assessor (`src.qc_assessor`) scans each MAG protein FASTA
+# against this marker set with `pyhmmer hmmsearch` and reports completeness +
+# contamination on the MIMAG (Bowers et al. 2017, Nat Biotechnol 35:725) tiers.
+#
+# Default = BUSCO bacteria_odb10 (124 single-copy bacterial markers, ~6 MB tarball,
+# stable URL). The originally-considered GTDB bac120 marker set ships only inside
+# the full GTDB-Tk reference package (~141 GB at R226), which is too large to
+# require for a QC step; we keep `bac120` here only as a manually-managed escape
+# hatch for users who already have the GTDB-Tk package extracted locally.
+#
+# Schema version is bumped only on breaking changes (e.g. removing a field that
+# downstream code reads). Adding new marker sets is non-breaking.
+
+schema_version: "1.0"
+default_marker_set: "busco_bacteria_odb10"
+
+marker_sets:
+
+  # Primary marker set used by the pipeline by default. Resolved 2026-05-10
+  # against https://busco-data.ezlab.org/v5/data/lineages/.
+  busco_bacteria_odb10:
+    label: "BUSCO_bacteria_odb10"
+    version: "2024-01-08"
+    url: "https://busco-data.ezlab.org/v5/data/lineages/bacteria_odb10.2024-01-08.tar.gz"
+    sha256: "a8a625ee04510c33fb42d39fd730a82b7cf93df5894f4566e7fe05dff75b45cd"
+    expected_marker_count: 124
+    archive_format: "tar.gz"
+    hmm_subdir: "bacteria_odb10/hmms"
+    # Per-HMM bit-score cutoffs (BUSCO format: <hmm_name>\t<bit_score>).
+    # Without these, divergent paralogs slip past a flat E-value threshold and
+    # inflate the contamination call. The fetcher copies this file to
+    # data/qc_markers/<key>.scores_cutoff.tsv where qc_assessor reads it.
+    scores_cutoff_relpath: "bacteria_odb10/scores_cutoff"
+    description: >-
+      BUSCO v5 bacteria_odb10 lineage dataset. Contains 124 near-universal
+      single-copy bacterial marker HMMs built against OrthoDB 10. Stable upstream,
+      ~6 MB compressed. Default marker set for the Phase 3 QC assessor.
+
+  # Optional manual path: GTDB R226 bac120 markers extracted from a locally
+  # available GTDB-Tk full package. The fetcher will refuse to download this
+  # multi-hundred-GB tarball; users must extract `markers/` themselves and
+  # point `local_marker_dir` at it.
+  gtdb_bac120_local:
+    label: "GTDB_R226_bac120_markers"
+    version: "R226"
+    expected_marker_count: 120
+    archive_format: "local_directory"
+    description: >-
+      GTDB R226 bacterial single-copy markers (78 TIGRFAMs + 42 Pfams) used by
+      GTDB-Tk for placement. Not auto-downloadable: GTDB only ships these inside
+      the full GTDB-Tk reference package (~141 GB at R226). Set
+      `local_marker_dir` in this entry to a directory of pre-extracted .hmm
+      files to use this marker set. Leave commented out otherwise.
+    # local_marker_dir: "/abs/path/to/gtdbtk/markers/pfam_and_tigrfam"

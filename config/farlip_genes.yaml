@@ -1,0 +1,176 @@
+# Canonical 21-gene FaRLiP cluster catalog (Gan et al. 2014, Science 345:1312).
+#
+# Each entry maps a FaRLiP role name to its resolution strategy against the JSC-1
+# reference (GCF_000733415.1). The cluster sits on contig NZ_KL662192.1 between
+# 1,095,910 and 1,121,582 bp (~25.7 kb of contiguous DNA), 21 genes in order.
+#
+# Resolution priority used by src/profile_builder.py:
+#   1. locus_tag (most precise; from the JSC-1 RefSeq GFF)
+#   2. protein_id (RefSeq WP_* accession, cross-checked against protein.faa)
+#   3. fallback match (gene_tag + product_substring, with cluster-locality tiebreak)
+#
+# When the secondary anchor (Chlorogloeopsis fritschii PCC 9212) is integrated in
+# Phase 2.1, additional `anchors:` entries can be added to each gene without
+# changing the schema.
+
+schema_version: "1.0"
+source: "Gan et al. 2014, Science 345:1312-1317. Cluster annotation cross-checked against the JSC-1 RefSeq GFF (GCF_000733415.1, generated 2026-05-10)."
+primary_reference:
+  assembly: "GCF_000733415.1"
+  contig: "NZ_KL662192.1"
+  cluster_start: 1095910
+  cluster_end: 1121582
+
+genes:
+  - name: psbA2
+    role: "PSII D1 paralog (far-red form; cluster position 1)"
+    match:
+      locus_tag: "OSCCY1_RS30350"
+      protein_id: "WP_036011370.1"
+      gene_tag: "psbA"
+      product_substring: "photosystem II q(b)"
+
+  - name: apcD2
+    role: "allophycocyanin alpha-like paralog (far-red phycobilisome)"
+    match:
+      locus_tag: "OSCCY1_RS30355"
+      protein_id: "WP_036011372.1"
+      product_substring: "allophycocyanin"
+
+  - name: apcD3
+    role: "allophycocyanin paralog (far-red phycobilisome)"
+    match:
+      locus_tag: "OSCCY1_RS30360"
+      protein_id: "WP_036011375.1"
+      product_substring: "allophycocyanin"
+
+  - name: apcB2
+    role: "allophycocyanin beta paralog (far-red phycobilisome)"
+    match:
+      locus_tag: "OSCCY1_RS30365"
+      protein_id: "WP_036011378.1"
+      product_substring: "allophycocyanin"
+
+  - name: apcE2
+    role: "phycobilisome core-membrane linker LCM (far-red form; annotated as PSI subunit XI in RefSeq, ~2.3 kb)"
+    match:
+      locus_tag: "OSCCY1_RS30375"
+      protein_id: "WP_051926079.1"
+      product_substring: "photosystem I reaction center subunit XI"
+
+  - name: apcD4
+    role: "allophycocyanin paralog (far-red phycobilisome)"
+    match:
+      locus_tag: "OSCCY1_RS30380"
+      protein_id: "WP_036011381.1"
+      product_substring: "allophycocyanin"
+
+  - name: psbD3
+    role: "PSII D2 paralog (far-red form)"
+    match:
+      locus_tag: "OSCCY1_RS30385"
+      protein_id: "WP_036011384.1"
+      gene_tag: "psbD"
+      product_substring: "photosystem II D2 protein"
+
+  - name: psbC2
+    role: "PSII CP43 paralog (far-red form)"
+    match:
+      locus_tag: "OSCCY1_RS30390"
+      protein_id: "WP_036011388.1"
+      gene_tag: "psbC"
+      product_substring: "photosystem II reaction center protein CP43"
+
+  - name: psbB2
+    role: "PSII CP47 paralog (far-red form)"
+    match:
+      locus_tag: "OSCCY1_RS30395"
+      protein_id: "WP_036011391.1"
+      gene_tag: "psbB"
+      product_substring: "photosystem II chlorophyll-binding protein CP47"
+
+  - name: psbH2
+    role: "PSII PsbH paralog (far-red form; annotated as hypothetical in RefSeq)"
+    match:
+      locus_tag: "OSCCY1_RS33520"
+      protein_id: "WP_063834837.1"
+
+  - name: rfpC
+    role: "FaRLiP-specific response regulator (cluster regulator 1)"
+    match:
+      locus_tag: "OSCCY1_RS35750"
+      protein_id: "WP_036011392.1"
+      product_substring: "response regulator"
+
+  - name: rfpA
+    role: "knotless red/far-red phytochrome (master FaRLiP regulator; GAF domain)"
+    match:
+      locus_tag: "OSCCY1_RS30410"
+      protein_id: "WP_051926080.1"
+      product_substring: "GAF domain"
+
+  - name: rfpB
+    role: "FaRLiP-specific DNA-binding response regulator (cluster regulator 2)"
+    match:
+      locus_tag: "OSCCY1_RS30415"
+      protein_id: "WP_036011395.1"
+      product_substring: "response regulator"
+
+  - name: psbA3
+    role: "PSII D1 paralog (second far-red form; cluster position 15)"
+    match:
+      locus_tag: "OSCCY1_RS30420"
+      protein_id: "WP_081915074.1"
+      gene_tag: "psbA"
+      product_substring: "photosystem II q(b)"
+
+  - name: psaA2
+    role: "PSI core protein PsaA paralog (far-red form)"
+    match:
+      locus_tag: "OSCCY1_RS30425"
+      protein_id: "WP_036011398.1"
+      gene_tag: "psaA"
+      product_substring: "photosystem I core protein PsaA"
+
+  - name: psaB2
+    role: "PSI core protein PsaB paralog (far-red form)"
+    match:
+      locus_tag: "OSCCY1_RS30430"
+      protein_id: "WP_036011400.1"
+      gene_tag: "psaB"
+      product_substring: "photosystem I core protein PsaB"
+
+  - name: psaL2
+    role: "PSI reaction center subunit XI paralog (far-red form)"
+    match:
+      locus_tag: "OSCCY1_RS30435"
+      protein_id: "WP_036011402.1"
+      product_substring: "photosystem I reaction center subunit XI"
+
+  - name: psaI2
+    role: "PSI reaction center subunit VIII paralog (far-red form)"
+    match:
+      locus_tag: "OSCCY1_RS30440"
+      protein_id: "WP_036011405.1"
+      gene_tag: "psaI"
+      product_substring: "photosystem I reaction center subunit VIII"
+
+  - name: psaF2
+    role: "PSI reaction center subunit III paralog (far-red form)"
+    match:
+      locus_tag: "OSCCY1_RS30445"
+      protein_id: "WP_036012501.1"
+      product_substring: "photosystem I reaction center subunit III"
+
+  - name: psaJ2
+    role: "PSI reaction center subunit IX paralog (far-red form)"
+    match:
+      locus_tag: "OSCCY1_RS30450"
+      protein_id: "WP_036011408.1"
+      product_substring: "photosystem I reaction center subunit IX"
+
+  - name: cluster_hypothetical_RS30370
+    role: "small ORF embedded in the cluster (annotated as hypothetical; included to make 21 of 21)"
+    match:
+      locus_tag: "OSCCY1_RS30370"
+      protein_id: "WP_051926078.1"

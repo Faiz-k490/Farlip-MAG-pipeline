@@ -1,0 +1,21 @@
+# FaRLiP pipeline runtime dependencies.
+# Python 3.10+ required (uses `from __future__ import annotations` + match-case).
+# Pinned to permissive lower bounds; tighten before publishing.
+
+# Phase 1: ingestion (NCBI Datasets, ENA Portal, SILVA, GTDB).
+biopython>=1.83          # Entrez NCBI E-utilities client (fallback path for assembly fetch)
+requests>=2.32           # HTTPS client for NCBI Datasets, ENA Portal, SILVA, GTDB
+PyYAML>=6.0              # config/*.yaml parsing
+pandas>=2.2              # manifest TSV read/write and tabular MAG metadata
+tqdm>=4.66               # progress bars for long downloads
+
+# Phase 2: FaRLiP detection (in-process C bindings; no system binaries required).
+pyrodigal>=3.5           # Prodigal gene prediction in meta mode (in-memory)
+pyhmmer>=0.10            # HMMER3 profile build + hmmsearch (in-memory)
+
+# Phase 1.5 external dependency (not installable via pip - must be on PATH):
+#   barrnap >= 0.9   (conda install -c bioconda barrnap)
+# SILVA SINA and GTDB-Tk are also user-run; the pipeline only emits their inputs.
+
+# Test runner (offline-only test suite under tests/).
+pytest>=8.0

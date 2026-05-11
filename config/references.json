@@ -1,0 +1,14 @@
+{
+  "$schema_version": "1.0",
+  "$description": "FaRLiP reference anchors. The 'primary' organism is the canonical 21-gene cluster baseline. 'secondary' is a list (possibly empty) of additional anchors for cross-checks. Adding a new anchor is a JSON edit only - no code changes.",
+  "primary": {
+    "label": "Leptolyngbya_sp_JSC-1",
+    "refseq_accession": "GCF_000733415.1",
+    "genbank_accession": "GCA_000733415.1",
+    "bioproject": "PRJNA62993",
+    "taxonomy_id": 1547898,
+    "source": "NCBI",
+    "rationale": "Original FaRLiP discovery organism (Gan et al. 2014, Science 345:1312). Cleanest canonical 21-gene cluster baseline."
+  },
+  "secondary": []
+}

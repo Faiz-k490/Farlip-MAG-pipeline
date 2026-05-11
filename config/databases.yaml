@@ -1,0 +1,29 @@
+# Phylogenetic and taxonomic database lock-in.
+# Edit URLs / versions here to upgrade; the pipeline re-downloads and re-verifies.
+# Human-readable rationale lives in DATA_SOURCES.md.
+
+schema_version: "1.0"
+
+silva:
+  version: "138.2"
+  release_date: "2024-07-11"
+  ssu_ref_nr99:
+    label: "SILVA_138.2_SSURef_NR99"
+    url: "https://www.arb-silva.de/fileadmin/silva_databases/release_138.2/Exports/SILVA_138.2_SSURef_NR99_tax_silva.fasta.gz"
+    md5_url: "https://www.arb-silva.de/fileadmin/silva_databases/release_138.2/Exports/SILVA_138.2_SSURef_NR99_tax_silva.fasta.gz.md5"
+    format: "fasta.gz"
+    notes: "FASTA preferred over .arb.gz so downstream HMMER / mafft / IQ-TREE can read directly."
+
+gtdb:
+  version: "R226"
+  release_path: "release226/226.0"
+  bac120_taxonomy:
+    label: "GTDB_R226_bac120_taxonomy"
+    url: "https://data.gtdb.ecogenomic.org/releases/release226/226.0/bac120_taxonomy_r226.tsv.gz"
+    format: "tsv.gz"
+    notes: "Bacterial taxonomy assignments based on 120 concatenated marker genes."
+  bac120_metadata:
+    label: "GTDB_R226_bac120_metadata"
+    url: "https://data.gtdb.ecogenomic.org/releases/release226/226.0/bac120_metadata_r226.tsv.gz"
+    format: "tsv.gz"
+    notes: "Per-genome quality, completeness, contamination, NCBI cross-refs."
