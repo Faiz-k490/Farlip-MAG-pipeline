@@ -1,4 +1,4 @@
-"""Join per-MAG QC TSVs with the Phase 1 manifest and Phase 2 FaRLiP rollup.
+"""Join per-MAG QC TSVs with the Phase 1 manifest and Phase 3 FaRLiP rollup.
 
 Produces two files:
 
@@ -210,9 +210,9 @@ def _read_manifest_assemblies(manifest_path: Path) -> list[dict[str, str]]:
 
 
 def _is_recommended(qc_quality: str, farlip_top: str) -> bool:
-    """Encode the Phase 4 phylogeny gate.
+    """Encode the Phase 5 phylogeny gate.
 
-    A MAG is recommended if its QC quality is at least MEDIUM **and** Phase 2
+    A MAG is recommended if its QC quality is at least MEDIUM **and** Phase 3
     flagged at least one FaRLiP candidate contig (i.e. ``farlip_top`` is not
     ``NONE``).
     """

@@ -28,9 +28,13 @@ surfaced as generated shell scripts whose execution is the user's
 responsibility. On a 39-assembly corpus consisting of *Leptolyngbya* sp.
 JSC-1 and 37 polar cyanobacterial MAGs from ENA `PRJEB59431`, the
 pipeline recovers all 21 canonical FaRLiP markers within a 25.7 kb window
-on JSC-1 and runs end-to-end in approximately 135 seconds on a 12-core
-laptop. The accompanying test suite contains 140 tests, executes in under
-three seconds, and requires no network access or external binaries.
+on JSC-1 and its in-process stages (Phase 1 ingestion, Phase 3 FaRLiP
+detection, and Phase 4 BUSCO-based quality assessment) run end-to-end in
+approximately 135 seconds on a 12-core laptop; the externally-run
+CheckM2, GTDB-Tk, and SILVA SINA jobs are executed on user infrastructure
+and are not included in that figure. The accompanying test suite contains
+140 tests, executes in under three seconds, and requires no network
+access or external binaries.
 
 # 1. Introduction
 
@@ -82,21 +86,37 @@ et al., 2023) as the test cohort.
 ## 2.1 Pipeline structure
 
 The pipeline is organised into four phases, each implemented as a
-standalone CLI module with its own manifest. Phase 1 ingests reference
-genomes and databases from NCBI Datasets, ENA, SILVA, and GTDB, with
-SHA-256 verification recorded in `data/manifest.tsv`. Phase 2 predicts
-open reading frames, builds 21 single-sequence HMM profiles from the
-JSC-1 reference proteins, runs HMMER3 in-process via `pyhmmer`, applies
-a synteny rule, and exports a per-MAG markdown vault. Phase 3 performs
+standalone CLI module with its own per-stage manifest:
+
+| Phase | Module | Purpose | Manifest |
+|---|---|---|---|
+| 1 | `src.pipeline` | Reference and database ingestion | `data/manifest.tsv` |
+| 2 | `src.pipeline_phase2` | 16S extraction and SILVA/GTDB-Tk routing | `data/phase2_manifest.tsv` |
+| 3 | `src.pipeline_phase3` | FaRLiP detection (ORFs, HMM profiles, synteny, vault) | `data/phase3_manifest.tsv` |
+| 4 | `src.pipeline_phase4` | Genome-quality assessment and filtered-MAG export | `data/phase4_manifest.tsv` |
+
+<p style="text-align:center; margin: 1em 0;"><img src="figures/pipeline_overview.svg" alt="Pipeline overview" style="max-width: 100%; width: 6.4in;"/></p>
+
+Phase 1 ingests reference genomes and databases from NCBI Datasets,
+ENA, SILVA, and GTDB, with SHA-256 verification recorded in
+`data/manifest.tsv`. Phase 2 extracts 16S rRNA sequences with `barrnap`
+(Seemann, 2013) and writes a routing log that directs each MAG either
+to SILVA SINA-based ribosomal classification (Pruesse et al., 2012)
+when 16S is recoverable, or to a generated GTDB-Tk runner script
+(Chaumeil et al., 2022) when it is not. Phase 3 predicts open reading
+frames, builds 21 single-sequence HMM profiles from the JSC-1
+reference proteins, runs HMMER3 in-process via `pyhmmer`, applies a
+synteny rule, and exports a per-MAG markdown vault. Phase 4 performs
 genome-quality assessment using BUSCO `bacteria_odb10` markers with
 per-HMM bit-score cutoffs, classifies each MAG against the MIMAG
 quality tiers (Bowers et al., 2017), and produces a filtered MAG list
-for downstream use. Phase 1.5, which logically precedes Phase 2 but
-was implemented after Phases 2 and 3 were stable, extracts 16S rRNA
-sequences with `barrnap` (Seemann, 2013) and writes a routing log that
-directs each MAG either to SILVA SINA-based ribosomal classification
-(Pruesse et al., 2012) when 16S is recoverable, or to a generated
-GTDB-Tk runner script (Chaumeil et al., 2022) when it is not.
+for downstream use.
+
+Phase 2 was implemented after Phases 3 and 4 had stabilised; the
+numbering reflects the logical execution order rather than the
+implementation order. The per-stage manifests are independent, so
+each phase can be re-run in isolation against artefacts produced by
+earlier phases.
 
 Each phase exposes a `status` subcommand whose output is computed
 purely from the manifest and a filesystem existence check. Failure at
@@ -149,7 +169,7 @@ CheckM2 requires a Diamond reference database, and GTDB-Tk requires
 the full GTDB R226 reference package, which is approximately 141 GB.
 Embedding either tool in the dependency graph would make the
 pipeline unusable on machines without those references already
-present. Instead, after Phase 3 has assembled the manifest of
+present. Instead, after Phase 4 has assembled the manifest of
 candidate MAGs, the module `src/checkm2_shellscript_generator.py`
 emits a `bash -n`-clean shell script that the user runs on whatever
 machine has CheckM2 installed; the resulting `quality_report.tsv` is
@@ -162,7 +182,7 @@ This split has a useful side effect: the SILVA submission path is
 treated symmetrically. SINA (the SILVA aligner) requires either a
 SILVA account for web upload or a substantial local reference
 installation, neither of which fits the pipeline's installation
-profile. The Phase 1.5 bundler instead concatenates the per-MAG 16S
+profile. The Phase 2 bundler instead concatenates the per-MAG 16S
 FASTA files into a single multi-FASTA at
 `data/ssu/silva_sina_input.fasta` whose record headers are stable
 across runs, leaving the actual SINA submission to the user.
@@ -185,7 +205,7 @@ new generator module, but does not touch `barrnap` invocation, the
 
 ## 2.5 Synteny classification
 
-The synteny rule used in Phase 2 is a two-window construction. A
+The synteny rule used in Phase 3 is a two-window construction. A
 contig becomes a *candidate* if any 10 kb sliding window contains
 hits to at least three distinct FaRLiP HMMs, which suppresses the
 single-paralog hits common in cyanobacterial photosynthesis operons.
@@ -236,7 +256,7 @@ any source modification.
 ## 4.1 Positive control
 
 The reference assembly *Leptolyngbya* sp. JSC-1 was processed
-end-to-end and the FaRLiP cluster recovered. Phase 2 reports
+end-to-end and the FaRLiP cluster recovered. Phase 3 reports
 `FULL_CLUSTER` on contig `NZ_KL662192.1` between positions 1,095,910
 and 1,121,582 (a 25.7 kb window), with 21 of 21 distinct FaRLiP
 markers detected and the minimum HMM E-value across all markers
@@ -260,7 +280,7 @@ positive nor a clean negative classification. From a downstream
 biology standpoint, these MAGs constitute the highest-value manual
 review candidates rather than noise.
 
-Phase 2 produced 153,619 predicted ORFs across the 39 assemblies,
+Phase 3 produced 153,619 predicted ORFs across the 39 assemblies,
 with a total of 9,043 reported HMM hits. A complete per-MAG report
 including hit counts, contig identifiers, and synteny window
 boundaries is written to `data/farlip_hits_report.tsv`.
@@ -302,10 +322,19 @@ without bloating the default installation.
 End-to-end wall time on a 12-core M-series laptop is dominated by
 ORF prediction (104 s for 39 assemblies, single-process) and HMM
 search (15 s); profile building, synteny parsing, and vault export
-are each under one second. Phase 3 marker fetch takes 2.6 s and
-assessment of all 39 MAGs takes 12 s. Phase 2 and Phase 3 combined
-run in approximately 135 s. Phase 1.5 wall time is dominated by
+are each under one second. Phase 4 marker fetch takes 2.6 s and
+assessment of all 39 MAGs takes 12 s. Phase 3 and Phase 4 combined
+run in approximately 135 s. Phase 2 wall time is dominated by
 the external `barrnap` invocation and varies with assembly count.
+This 135 s figure measures only the in-process Python work that the
+pipeline itself executes. The CheckM2, GTDB-Tk, and SILVA SINA jobs
+that Phase 2 and Phase 4 emit as shell scripts run on whatever
+infrastructure the user supplies and are not part of this
+measurement; on a typical workstation with the 141 GB GTDB R226
+reference resident on local SSD, GTDB-Tk classification of the
+gtdbtk-routed subset of the 39-assembly cohort dominates the
+wall-clock cost of the full workflow and is between one and two
+orders of magnitude larger than the 135 s in-process budget.
 
 The full test suite of 140 tests passes in under three seconds
 with no network access and no external binaries available.
@@ -344,7 +373,7 @@ workflow engine is implicit in the engine's evaluation rules and is
 not auditable in the same way. Users whose cohorts outgrow a single
 machine can wrap the existing CLI subcommands as Snakemake rules
 without modifying any code in the repository, which is in fact the
-intended Phase 4 deployment path.
+intended Phase 5 deployment path.
 
 Several limitations are worth recording. The pipeline is single-
 process and does not parallelise across MAGs above the internal
@@ -353,9 +382,9 @@ order of 10,000 MAGs a `multiprocessing.Pool` over the manifest is
 trivial to add but has not been needed. No Dockerfile is shipped;
 the pure-pip installation is intentional, but a container would
 harden the `barrnap` external dependency for users without conda.
-The Phase 4 phylogenetic placement step on the SILVA-aligned and
+The Phase 5 phylogenetic placement step on the SILVA-aligned and
 GTDB-Tk-classified MAGs is designed but not implemented, and the
-filtered-MAG TSV emitted at the end of Phase 3 is the contract
+filtered-MAG TSV emitted at the end of Phase 4 is the contract
 that step will consume.
 
 The pipeline, configuration files, generated scripts, and full test
@@ -363,9 +392,9 @@ suite are available in the project repository. End-to-end
 reproduction of the validation results in Section 4 requires only
 `git clone`, `python3 -m venv .venv`, `pip install -r
 requirements.txt`, and the four CLI invocations
-`python -m src.pipeline fetch`, `python -m src.pipeline_phase2 all`,
-`python -m src.pipeline_phase3 all`, and (with `barrnap` on PATH)
-`python -m src.pipeline_phase1_5 all`. Reference databases are
+`python -m src.pipeline fetch`, (with `barrnap` on PATH)
+`python -m src.pipeline_phase2 all`, `python -m src.pipeline_phase3 all`,
+and `python -m src.pipeline_phase4 all`. Reference databases are
 downloaded on first run and SHA-256-verified against the values
 recorded in `data/manifest.tsv`.
 

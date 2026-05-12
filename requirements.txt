@@ -9,11 +9,11 @@ PyYAML>=6.0              # config/*.yaml parsing
 pandas>=2.2              # manifest TSV read/write and tabular MAG metadata
 tqdm>=4.66               # progress bars for long downloads
 
-# Phase 2: FaRLiP detection (in-process C bindings; no system binaries required).
+# Phase 3: FaRLiP detection (in-process C bindings; no system binaries required).
 pyrodigal>=3.5           # Prodigal gene prediction in meta mode (in-memory)
 pyhmmer>=0.10            # HMMER3 profile build + hmmsearch (in-memory)
 
-# Phase 1.5 external dependency (not installable via pip - must be on PATH):
+# Phase 2 external dependency (not installable via pip - must be on PATH):
 #   barrnap >= 0.9   (conda install -c bioconda barrnap)
 # SILVA SINA and GTDB-Tk are also user-run; the pipeline only emits their inputs.
 

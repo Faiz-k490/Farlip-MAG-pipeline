@@ -182,7 +182,7 @@ _QC_REPORT_HEADER = (
 
 
 def _write_qc_report(tmp_path: Path, rows: list[str]) -> Path:
-    """Materialize a Phase 3 ``qc_report.tsv`` fixture and return its path."""
+    """Materialize a Phase 4 ``qc_report.tsv`` fixture and return its path."""
     p = tmp_path / "qc_report.tsv"
     p.write_text(_QC_REPORT_HEADER + "\n".join(rows) + "\n", encoding="utf-8")
     return p
@@ -263,7 +263,7 @@ def test_export_vault_master_index_includes_quality_section(tmp_path: Path):
 
 
 def test_export_vault_omits_qc_when_path_none(tmp_path: Path):
-    """Without a QC report, the Phase 2 layout is unchanged."""
+    """Without a QC report, the Phase 3 layout is unchanged."""
     contig_rows = [
         "GCA_HIT\tctg1\t12345\t5\t10\tA,B,C,D,E\t1-100,200-300,400-500,600-700,800-900"
         "\t1.00e-30\tfalse\tPARTIAL_CLUSTER",

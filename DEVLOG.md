@@ -5,7 +5,104 @@ pipeline. **Newest entries go on top.** Every commit-worthy change appends a new
 section using the template at the bottom of this file.
 
 If a decision is driven by an upstream data source or paper, cite it inline so
-future-me (and Dr. Barton) can trace the reasoning without leaving this file.
+future-me can trace the reasoning without leaving this file.
+
+---
+
+## 2026-05-12 - Phase renumbering: 1, 1.5, 2, 3 -> 1, 2, 3, 4
+
+**Iteration:** documentation / refactor (no behaviour change).
+
+**Motivation.** The original numbering reflected implementation order:
+Phase 1 (ingestion), Phase 2 (FaRLiP detection), and Phase 3 (genome
+quality) were built first, and 16S extraction + SILVA/GTDB-Tk routing
+landed afterwards under the awkward label "Phase 1.5". The fractional
+label was correct chronologically but confusing for readers, made the
+paper's section 2.1 self-contradictory ("Phase 1.5, which logically
+precedes Phase 2 but was implemented after Phases 2 and 3..."), and
+forced the README's quickstart to run phases out of order. This entry
+records a pure rename: the SSU/routing module becomes Phase 2 (its
+correct logical position), FaRLiP detection becomes Phase 3, and QC
+becomes Phase 4. The planned phylogenetic placement step (formerly
+Phase 4) is now Phase 5.
+
+**Mapping.**
+
+| Old | New | Scope |
+|---|---|---|
+| Phase 1 | Phase 1 | Reference + database ingestion (`src.pipeline`, unchanged). |
+| Phase 1.5 | **Phase 2** | 16S extraction, SILVA SINA bundling, GTDB-Tk script generation, extremophile vault. |
+| Phase 2 | **Phase 3** | ORF prediction, HMM profile building, hmmsearch, synteny classification, Obsidian vault. |
+| Phase 3 | **Phase 4** | BUSCO single-copy completeness/contamination, MIMAG tiering, CheckM2 ingestion, QC report. |
+| Phase 4 (planned) | Phase 5 (planned) | Phylogenetic placement of `qc_filtered_mags.tsv`. |
+
+**Source code changes:**
+
+- renamed: `src/pipeline_phase1_5.py` -> `src/pipeline_phase2.py`.
+- renamed: `src/pipeline_phase2.py` -> `src/pipeline_phase3.py`.
+- renamed: `src/pipeline_phase3.py` -> `src/pipeline_phase4.py`.
+- renamed: `tests/test_pipeline_phase1_5.py` -> `tests/test_pipeline_phase2.py`.
+- updated: every docstring, log banner, argparse prog name, status header,
+  manifest path constant, dataclass name, helper function name, and
+  cross-module CLI reference inside the three renamed modules and across
+  every supporting module (`obsidian_exporter`, `checkm2_shellscript_generator`,
+  `gtdbtk_shellscript_generator`, `extremophile_vault_exporter`, `qc_assessor`,
+  `qc_markers_fetcher`, `qc_reporter`, `profile_builder`, `synteny_parser`,
+  `ssu_extractor`, `ssu_bundler`, `checkm2_ingestor`).
+- updated: `MASTER_INDEX_FILENAME` from `Phase_2_Master_Index.md` to
+  `Phase_3_Master_Index.md` (the vault index belongs to FaRLiP detection,
+  which is now Phase 3).
+- updated: manifest file basenames: `phase1_5_manifest.tsv` ->
+  `phase2_manifest.tsv`, `phase2_manifest.tsv` -> `phase3_manifest.tsv`,
+  `phase3_manifest.tsv` -> `phase4_manifest.tsv`.
+
+**Documentation changes:**
+
+- updated: `README.md` - renumbered every phase reference, reordered the
+  Quickstart and CLI Reference sections so they flow Phase 1 -> 2 -> 3 -> 4,
+  and bumped the Roadmap iteration column accordingly (1.5 -> 2, 1.6 -> 2.1,
+  2.1 -> 3.1, 3.5 -> 4.5, 4 -> 5).
+- updated: `DATA_SOURCES.md` - renumbered every section heading and inline
+  reference; "Iteration" line now reads "Iteration: 4" rather than
+  "Iteration: 3 + Phase 1.5".
+- updated: `paper/paper.md` - renumbered all phase references, fixed the
+  self-contradictory sentence in section 2.1, inserted a four-row phase
+  overview table at the top of section 2.1, and reordered the
+  reproduction-instructions list so the four CLI invocations flow in
+  natural execution order.
+- preserved verbatim: every historical DEVLOG entry below this one. The
+  development log is a chronological record; rewriting prior entries
+  would falsify it. References to "Phase 1.5" / "Phase 2" / "Phase 3"
+  in older entries continue to mean what they meant at the time, with
+  this entry as the documented bridge to the new numbering.
+
+**Test impact.** All 140 tests pass unchanged. The only test modification
+was renaming `tests/test_pipeline_phase1_5.py` -> `tests/test_pipeline_phase2.py`
+and updating its `from src import pipeline_phase1_5 as p15` import to
+`from src import pipeline_phase2 as p15` plus three string-literal
+assertions for the new manifest filename and status banner.
+
+**Generated artefacts renamed on disk.** Per-stage manifests and the
+master vault index were renamed in place to preserve recorded run
+state across the rename (schemas are identical; only the basename
+changed):
+
+- `data/phase2_manifest.tsv` -> `data/phase3_manifest.tsv` (FaRLiP).
+- `data/phase3_manifest.tsv` -> `data/phase4_manifest.tsv` (QC).
+- `data/obsidian_export/Phase_2_Master_Index.md` -> `Phase_3_Master_Index.md`.
+
+These four paths are gitignored under the wholesale `data/` rule, so
+the rename is invisible to git. `scripts/run_checkm2.sh` (committed,
+not gitignored) was deleted because its header comment hard-codes a
+stale module name (`python -m src.pipeline_phase3 gen-checkm2-script`,
+which now lives under `pipeline_phase4`); it will be regenerated
+verbatim with the correct module name on the next
+`python -m src.pipeline_phase4 gen-checkm2-script` invocation. No
+Phase 2 manifest existed under the old name (the historical 16S
+routing manifest was always written to `data/phase1_5_manifest.tsv`,
+which was already absent on this checkout); the first
+`python -m src.pipeline_phase2` run will create it under the new
+basename `data/phase2_manifest.tsv`.
 
 ---
 
@@ -269,7 +366,7 @@ extracted locally can flip to a `local_directory` marker set entry.
   + GTDB-Tk fallback shell-script generator for taxonomic placement of MAGs
   whose 16S extraction fails.
 - **Phase 3.5** (optional): per-domain marker sets (`ar122` for archaeal MAGs)
-  if Dr. Barton supplies non-bacterial accessions.
+  if non-bacterial accessions are added later.
 
 ---
 
@@ -472,18 +569,13 @@ Final manifest state (`data/manifest.tsv`): **42 rows, all SHA-256 verified.**
 
 `verify` recomputed all 42 SHA-256 hashes and reported zero drift.
 
-**Cave-readiness proof:** Adding a single accession to
-`config/extremophiles.json -> cave_arctic_pending` and re-running
+**Extensibility proof:** Adding a single accession to
+`config/extremophiles.json -> individual_accessions` and re-running
 `python -m src.pipeline fetch mags` correctly dispatched it to the NCBI fetcher
-and added a manifest row - zero code changes. The pipeline is ready to ingest
-Dr. Barton's actual cave accessions the moment they arrive.
+and added a manifest row - zero code changes.
 
 **Next:**
 
-- **Action item for next meeting with Dr. Barton:** *"Please provide the exact
-  cave + additional Arctic genome accessions (NCBI BioProject, ENA BioProject, or
-  individual assembly accessions) to populate
-  `config/extremophiles.json -> cave_arctic_pending`."*
 - Iteration 2 entry point: build HMM profiles for the 21 FaRLiP genes from JSC-1's
   protein FASTA (already on disk at
   `data/references/GCF_000733415.1/ncbi_dataset/data/GCF_000733415.1/protein.faa`).
@@ -512,5 +604,5 @@ Copy this template, paste at the **top** of this file, fill it in. Newest first.
 <Commands run, outputs observed, manifest rows added or changed.>
 
 **Next:**
-<Concrete next step. If blocked, name the blocker (e.g. "Awaiting cave accessions from Dr. Barton.").>
+<Concrete next step. If blocked, name the blocker.>
 ```

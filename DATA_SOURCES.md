@@ -5,8 +5,8 @@ ingestion pipeline depends on. It is the human-readable counterpart to the machi
 configs in [`config/`](config/). When anything here changes, update the matching config file
 *and* append a new entry to [`DEVLOG.md`](DEVLOG.md).
 
-**Iteration:** 3 + Phase 1.5 (Phase 1 ingestion + Phase 1.5 SSU/taxonomic routing +
-Phase 2 FaRLiP detection + Phase 3 QC + extremophile vault).
+**Iteration:** 4 (Phase 1 ingestion + Phase 2 SSU/taxonomic routing +
+Phase 3 FaRLiP detection + Phase 4 QC + extremophile vault).
 **Last updated:** 2026-05-10.
 
 ---
@@ -121,19 +121,7 @@ cyanobacterial classification problems by using genome-wide concatenated marker 
 
 ---
 
-## 5. Cave & Additional Arctic Genomes — TBD
-
-Placeholder list in [`config/extremophiles.json`](config/extremophiles.json) under
-`cave_arctic_pending: []`. Dr. Barton will supply the exact NCBI / ENA accessions; the
-pipeline is config-driven, so populating this list is a one-line edit — no code changes.
-
-**Action item.** Bring to next meeting with Dr. Barton: *"Please provide the exact cave +
-additional Arctic genome accessions (NCBI BioProject, ENA BioProject, or individual
-assembly accessions) so we can populate `cave_arctic_pending` and re-run the ingest."*
-
----
-
-## 6. Verification Checklist
+## 5. Verification Checklist
 
 Before declaring iteration 1 complete, every entry above must satisfy:
 
@@ -145,7 +133,7 @@ Before declaring iteration 1 complete, every entry above must satisfy:
 
 ---
 
-## 7. FaRLiP Gene Catalog (Phase 2)
+## 7. FaRLiP Gene Catalog (Phase 3)
 
 The 21-gene catalog driving HMM profile construction is committed at
 [`config/farlip_genes.yaml`](config/farlip_genes.yaml). Each entry maps a FaRLiP
@@ -196,7 +184,7 @@ The catalog itself remains the authoritative source - this table is a
 human-readable echo for reviewers; if the YAML and this table disagree, the YAML
 wins and this table should be regenerated.
 
-**Phase 2.1 plan.** Chlorogloeopsis fritschii PCC 9212 (`GCF_000019485.1`) will
+**Phase 3.1 plan.** Chlorogloeopsis fritschii PCC 9212 (`GCF_000019485.1`) will
 be added as `anchors:` per gene in `config/farlip_genes.yaml`. Combined with
 mafft (via subprocess) the per-gene HMMs become true MSA-based profiles, which
 will substantially improve sensitivity on divergent FaRLiP paralogs in
@@ -204,9 +192,9 @@ fragmented MAGs.
 
 ---
 
-## 8. Single-Copy Marker HMMs for Genome Quality Assessment (Phase 3)
+## 8. Single-Copy Marker HMMs for Genome Quality Assessment (Phase 4)
 
-The Phase 3 quality-assessment pipeline (`src.qc_assessor`) needs a bacterial
+The Phase 4 quality-assessment pipeline (`src.qc_assessor`) needs a bacterial
 single-copy ortholog (SCO) marker HMM database to score MAG completeness and
 contamination on the MIMAG quality tiers (Bowers et al. 2017,
 *Nat Biotechnol* 35:725 - High-quality: completeness >= 90% and contamination
@@ -246,7 +234,7 @@ against this marker set (MIMAG MEDIUM), which sits inside the published
 BUSCO-vs-CheckM2 envelope for cyanobacterial RefSeq assemblies. Users who
 need the strict MIMAG HIGH tier should run the optional
 `scripts/run_checkm2.sh` cross-validation path (see DEVLOG entry for
-2026-05-10 Phase 3).
+2026-05-10 Phase 4).
 
 **MIMAG threshold citation.** Bowers, R., Kyrpides, N., Stepanauskas, R.,
 Harmon-Smith, M., Doud, D., Reddy, T., et al. 2017. Minimum information about
@@ -255,13 +243,13 @@ of bacteria and archaea. *Nat Biotechnol* 35:725-731.
 
 ---
 
-## 9. Phase 1.5 - SSU Extraction and Taxonomic-Placement Routing
+## 9. Phase 2 - SSU Extraction and Taxonomic-Placement Routing
 
-Phase 1.5 wires the Phase 1 manifest into species-level taxonomic placement.
+Phase 2 wires the Phase 1 manifest into species-level taxonomic placement.
 Every assembly is scanned for 16S rRNA with `barrnap`; MAGs that yield at
 least one 16S record are bundled for SILVA SINA submission, MAGs that do
 not are routed to a generated GTDB-Tk shell script for genome-wide marker
-classification. Phase 1.5 only prepares inputs - it never contacts SILVA
+classification. Phase 2 only prepares inputs - it never contacts SILVA
 SINA or runs GTDB-Tk itself (the latter requires the ~141 GB GTDB R226
 reference data and is impractical to bundle into the pipeline).
 
@@ -326,7 +314,7 @@ Database. *Bioinformatics* 38:5315-5316.
 
 ### 9.4 Routing log schema
 
-`data/ssu/routing_log.tsv` is the single source of truth for Phase 1.5
+`data/ssu/routing_log.tsv` is the single source of truth for Phase 2
 decisions. Columns (`src.ssu_extractor.ROUTING_LOG_COLUMNS`):
 
 ```
@@ -334,18 +322,18 @@ accession  source  fasta_path  n_contigs_scanned  n_16S_predicted
 decision   output_path  barrnap_version  notes
 ```
 
-`decision` is one of `silva` / `gtdbtk`. The Phase 3
+`decision` is one of `silva` / `gtdbtk`. The Phase 4
 `extremophile_vault_exporter` joins on `accession` to set the
 `Taxonomic_Placement` frontmatter slot in
 `data/extremophile_vault/<accession>.md`.
 
 ---
 
-## 10. Phase 3 Extremophile Vault Export
+## 10. Phase 4 Extremophile Vault Export
 
 `data/extremophile_vault/` is rendered by
 `src/extremophile_vault_exporter.py` from `data/qc_filtered_mags.tsv` (the
-`recommended_for_phylogeny == True` view) plus, optionally, the Phase 1.5
+`recommended_for_phylogeny == True` view) plus, optionally, the Phase 2
 routing log. Each per-MAG note carries exactly the five-key frontmatter
 mandated by the assignment:
 
@@ -360,7 +348,7 @@ FaRLiP_Cluster_Present:
 ```
 
 `FaRLiP_Cluster_Present` is intentionally **blank** in the frontmatter -
-filled in by manual review after consulting the Phase 2 vault note for the
+filled in by manual review after consulting the Phase 3 vault note for the
 same accession (`data/obsidian_export/<accession>.md`). The master index
 `High_Quality_Extremophile_Genomes.md` wikilinks to every per-MAG note and
 groups by MIMAG tier when multiple tiers are present.

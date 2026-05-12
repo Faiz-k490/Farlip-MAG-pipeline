@@ -1,29 +1,29 @@
-"""CLI orchestrator for the genome-quality assessment pipeline (Phase 3).
+"""CLI orchestrator for the FaRLiP detection pipeline (Phase 3).
 
-Reads the Phase 1 manifest (``data/manifest.tsv``) and the Phase 2 FaRLiP
-roll-up (``data/farlip_hits_per_mag.tsv``) and runs - in order, or as
-individually-invoked subcommands - the QC pipeline:
+Reads the Phase 1 manifest (``data/manifest.tsv``) and runs - in order, or as
+individually-invoked subcommands - the four-stage detection pipeline:
 
-1. **fetch-markers** - :func:`src.qc_markers_fetcher.fetch_default_marker_set`
-   downloads the configured single-copy marker HMM set into
-   ``data/qc_markers/<label>.hmm``.
-2. **assess** - :func:`src.qc_assessor.assess_assembly` for every assembly row,
-   writing one ``data/qc_assessor/<accession>.qc.tsv`` per MAG.
-3. **gen-checkm2-script** - :func:`src.checkm2_shellscript_generator.generate_checkm2_script`
-   emits ``scripts/run_checkm2.sh`` for opt-in cross-validation.
-4. **ingest-checkm2** - :func:`src.checkm2_ingestor.ingest_all_checkm2`
-   normalizes any ``data/checkm2_results/<accession>/quality_report.tsv``
-   files into ``data/checkm2_ingest/<accession>.qc.tsv``.
-5. **report** - :func:`src.qc_reporter.write_qc_reports` joins the QC sources
-   with the manifest and FaRLiP roll-up, writing ``data/qc_report.tsv`` and
-   ``data/qc_filtered_mags.tsv``.
-6. **update-vault** - re-runs :func:`src.obsidian_exporter.export_vault` with
-   the QC report path so per-MAG markdown gets the QC frontmatter and the
-   master index gets the Quality subsection.
+1. **orf-predict** - :func:`src.orf_predictor.predict_orfs` for every assembly row
+   in the manifest (NCBI + ENA sources; SILVA and GTDB rows are skipped).
+2. **build-profiles** - :func:`src.profile_builder.build_profiles` against the JSC-1
+   reference assembly. Produces ``data/hmm_profiles/farlip_21.hmm``.
+3. **search** - :func:`src.hmm_searcher.run_search` for every per-MAG ``.faa``.
+4. **parse-synteny** - :func:`src.synteny_parser.classify_mag` and reports.
+5. **export-vault** - :func:`src.obsidian_exporter.export_vault`.
 
-Every subcommand is idempotent. Phase 3 progress is tracked in
-``data/phase3_manifest.tsv`` (one row per ``(accession, stage)``) so a partial
-``all`` run can resume from where it stopped.
+Every subcommand is independently re-runnable and idempotent. Phase 3 progress is
+tracked in ``data/phase3_manifest.tsv`` (one row per accession per stage), so a
+partial ``all`` run can resume from where it stopped.
+
+Subcommands (see ``python -m src.pipeline_phase3 --help``):
+
+* ``orf-predict   [--overwrite] [--accession ...]``
+* ``build-profiles [--overwrite]``
+* ``search         [--overwrite] [--accession ...]``
+* ``parse-synteny  [--overwrite]``
+* ``export-vault   [--overwrite]``
+* ``all            [--overwrite]``
+* ``status``
 """
 
 from __future__ import annotations
@@ -35,52 +35,37 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 
-from .checkm2_ingestor import (
-    CHECKM2_INGEST_DIRNAME,
-    CHECKM2_RESULTS_DIRNAME,
-    ingest_all_checkm2,
-)
-from .checkm2_shellscript_generator import (
-    CHECKM2_SCRIPT_RELPATH,
-    CHECKM2_THREADS_DEFAULT,
-    generate_checkm2_script,
-)
-from .extremophile_vault_exporter import (
-    VAULT_DIRNAME as EXTREMOPHILE_VAULT_DIRNAME,
-    export_extremophile_vault,
-)
 from .manifest import read_manifest
+from .orf_predictor import predict_orfs
+from .profile_builder import build_profiles
+from .hmm_searcher import run_search
+from .synteny_parser import Classification, classify_mag, write_reports
+
+
+_CLASSIFICATION_DISPLAY_PRIORITY: dict[str, int] = {
+    Classification.FULL_CLUSTER.value: 3,
+    Classification.EDGE_TRUNCATED.value: 2,
+    Classification.PARTIAL_CLUSTER.value: 1,
+    Classification.NONE.value: 0,
+}
+"""Priority used to pick a per-MAG headline classification for stderr logging."""
 from .obsidian_exporter import export_vault
-from .qc_assessor import assess_assembly
-from .qc_markers_fetcher import (
-    QC_MARKERS_DIR_NAME,
-    fetch_default_marker_set,
-    resolve_default_spec,
-)
-from .qc_reporter import write_qc_reports
-from .ssu_bundler import ROUTING_LOG_FILENAME
 
 
 REPO_ROOT: Path = Path(__file__).resolve().parent.parent
 """Repository root, derived from this module's location."""
 
 DEFAULT_DATA_ROOT: Path = REPO_ROOT / "data"
-"""Root of all pipeline outputs. Phases 1 and 2 already wrote into this directory."""
+"""Root of all pipeline outputs. Phase 1 already wrote into this directory."""
 
 DEFAULT_MANIFEST: Path = DEFAULT_DATA_ROOT / "manifest.tsv"
 """Phase 1 manifest, consumed read-only by Phase 3."""
 
 DEFAULT_CONFIG_DIR: Path = REPO_ROOT / "config"
-"""Directory containing ``qc_markers.yaml``."""
+"""Directory containing ``farlip_genes.yaml``."""
 
-DEFAULT_QC_MARKERS_CONFIG: Path = DEFAULT_CONFIG_DIR / "qc_markers.yaml"
-"""Default location of the QC marker-set config."""
-
-DEFAULT_SCRIPTS_DIR: Path = REPO_ROOT / "scripts"
-"""Where the generated CheckM2 shell script lands by default."""
-
-QC_ASSESSOR_DIRNAME: str = "qc_assessor"
-"""Subdirectory under ``data/`` for per-MAG pyhmmer QC TSVs."""
+REFERENCE_ACCESSION: str = "GCF_000733415.1"
+"""Primary FaRLiP reference (JSC-1). Profiles are built from this assembly."""
 
 PHASE3_MANIFEST_COLUMNS: tuple[str, ...] = (
     "accession",
@@ -95,8 +80,9 @@ PHASE3_MANIFEST_COLUMNS: tuple[str, ...] = (
 )
 """Column order for ``data/phase3_manifest.tsv``. Stable; extended only by appending."""
 
-NON_ASSEMBLY_SOURCES: frozenset[str] = frozenset({"SILVA", "GTDB", "QC_MARKERS"})
-"""Manifest sources whose rows are skipped during QC assessment."""
+NON_ASSEMBLY_SOURCES: frozenset[str] = frozenset({"SILVA", "GTDB"})
+"""Manifest sources whose rows are skipped during ORF prediction (these are reference
+databases, not genome assemblies)."""
 
 
 @dataclass
@@ -115,12 +101,19 @@ class _Phase3Row:
 
 
 def _utc_now() -> str:
-    """Return a UTC ISO-8601 timestamp matching the Phase 1/2 manifests."""
+    """Return a UTC ISO-8601 timestamp matching the Phase 1 manifest convention."""
     return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
 
 
 def _read_phase3_manifest(path: Path) -> list[dict[str, str]]:
-    """Load ``data/phase3_manifest.tsv`` if it exists."""
+    """Load ``data/phase3_manifest.tsv`` if it exists.
+
+    Args:
+        path: Manifest path.
+
+    Returns:
+        Rows as dicts (empty list if file absent).
+    """
     if not path.exists():
         return []
     with path.open("r", encoding="utf-8") as fh:
@@ -128,7 +121,12 @@ def _read_phase3_manifest(path: Path) -> list[dict[str, str]]:
 
 
 def _write_phase3_manifest(path: Path, rows: list[dict[str, str]]) -> None:
-    """Write a Phase 3 manifest TSV with the canonical column order."""
+    """Write a Phase 3 manifest TSV with the canonical column order.
+
+    Args:
+        path: Output path. Parent created if missing.
+        rows: Iterable of row dicts. Missing columns are filled with empty strings.
+    """
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("w", encoding="utf-8") as fh:
         writer = csv.DictWriter(
@@ -143,7 +141,12 @@ def _write_phase3_manifest(path: Path, rows: list[dict[str, str]]) -> None:
 
 
 def _upsert_phase3_rows(path: Path, new_rows: list[_Phase3Row]) -> None:
-    """Merge new rows into the Phase 3 manifest, replacing on (accession, stage)."""
+    """Merge new rows into the Phase 3 manifest, replacing on ``(accession, stage)``.
+
+    Args:
+        path: Manifest path.
+        new_rows: Rows to merge in.
+    """
     existing = _read_phase3_manifest(path)
     keyed: dict[tuple[str, str], dict[str, str]] = {
         (r.get("accession", ""), r.get("stage", "")): r for r in existing
@@ -163,23 +166,63 @@ def _upsert_phase3_rows(path: Path, new_rows: list[_Phase3Row]) -> None:
     _write_phase3_manifest(path, list(keyed.values()))
 
 
+def _resolve_genomic_fasta(row: dict[str, str]) -> Path | None:
+    """Locate the genomic FASTA for one Phase 1 manifest row.
+
+    NCBI rows use the unpacked ``ncbi_dataset/data/<accession>/*_genomic.fna``
+    inside ``extracted_dir``; ENA rows use ``local_path`` directly.
+
+    Args:
+        row: One Phase 1 manifest row.
+
+    Returns:
+        Absolute path to the genomic FASTA, or ``None`` if the file cannot be
+        located. Returning ``None`` lets the caller skip cleanly rather than
+        crashing the whole sweep on one bad row.
+    """
+    source = row.get("source", "")
+    accession = row.get("accession", "")
+    if source == "NCBI":
+        extracted_dir = row.get("extracted_dir", "")
+        if not extracted_dir:
+            return None
+        base = Path(extracted_dir) / "ncbi_dataset" / "data" / accession
+        if not base.exists():
+            return None
+        candidates = sorted(base.glob("*_genomic.fna"))
+        if candidates:
+            return candidates[0]
+        candidates = sorted(base.glob("*.fna"))
+        return candidates[0] if candidates else None
+    if source == "ENA":
+        local_path = row.get("local_path", "")
+        if not local_path:
+            return None
+        p = Path(local_path)
+        return p if p.exists() else None
+    return None
+
+
 def _iter_assembly_rows(
     manifest_path: Path,
     accession_filter: list[str] | None = None,
 ) -> list[dict[str, str]]:
-    """Yield every Phase 1 manifest row eligible for QC.
+    """Yield every manifest row eligible for ORF prediction / search.
 
     Args:
         manifest_path: Phase 1 manifest path.
         accession_filter: If non-empty, restrict to these accessions.
 
     Returns:
-        Eligible rows in manifest order.
+        List of manifest rows in file order.
     """
     rows = read_manifest(manifest_path)
     out: list[dict[str, str]] = []
     filter_set = set(accession_filter or [])
     for row in rows:
+        # ``ok`` = freshly downloaded this run; ``skipped`` = already on disk and
+        # left in place by an idempotent re-fetch. Both states mean the artifact
+        # exists locally and is eligible for Phase 3 processing.
         if row.get("status") not in {"ok", "skipped"}:
             continue
         if row.get("source", "") in NON_ASSEMBLY_SOURCES:
@@ -190,171 +233,57 @@ def _iter_assembly_rows(
     return out
 
 
-def cmd_fetch_markers(
-    config_dir: Path,
-    data_root: Path,
-    *,
-    overwrite: bool,
-    manifest_path: Path,
-) -> int:
-    """Download the configured default marker set and concatenate it.
-
-    Args:
-        config_dir: Config directory containing ``qc_markers.yaml``.
-        data_root: Root data directory (output lands under ``data/qc_markers/``).
-        overwrite: If True, re-download even when the stamp matches.
-        manifest_path: Phase 1 manifest path; the marker artifact gets a row.
-
-    Returns:
-        Exit code (0 on success, 2 on configuration / download failure).
-    """
-    config_path = config_dir / "qc_markers.yaml"
-    phase3_manifest = data_root / "phase3_manifest.tsv"
-    if not config_path.exists():
-        sys.stderr.write(f"[fetch-markers] missing {config_path}\n")
-        return 2
-    spec = resolve_default_spec(config_path)
-    sys.stderr.write(
-        f"[fetch-markers] default marker set = {spec.label} ({spec.archive_format})\n"
-    )
-    t0 = time.perf_counter()
-    try:
-        result = fetch_default_marker_set(
-            config_path,
-            data_root,
-            overwrite=overwrite,
-            manifest_path=manifest_path,
-        )
-    except Exception as exc:
-        sys.stderr.write(f"[fetch-markers] FAILED: {exc}\n")
-        _upsert_phase3_rows(
-            phase3_manifest,
-            [
-                _Phase3Row(
-                    accession=spec.label,
-                    source="QC_MARKERS",
-                    stage="fetch-markers",
-                    status="failed",
-                    output_path="",
-                    n_units=0,
-                    elapsed_s=time.perf_counter() - t0,
-                    completed_at=_utc_now(),
-                    note=str(exc),
-                )
-            ],
-        )
-        return 2
-    elapsed = time.perf_counter() - t0
-    marker = "=" if result.skipped else "+"
-    sys.stderr.write(
-        f"  {marker} {result.label}: n_markers={result.n_markers} "
-        f"-> {result.hmm_db_path} ({elapsed:.1f}s)\n"
-    )
-    _upsert_phase3_rows(
-        phase3_manifest,
-        [
-            _Phase3Row(
-                accession=result.label,
-                source="QC_MARKERS",
-                stage="fetch-markers",
-                status="skipped" if result.skipped else "ok",
-                output_path=str(result.hmm_db_path),
-                n_units=result.n_markers,
-                elapsed_s=elapsed,
-                completed_at=_utc_now(),
-                note=f"sha256={result.archive_sha256[:16]}" if result.archive_sha256 else "",
-            )
-        ],
-    )
-    return 0
-
-
-def cmd_assess(
+def cmd_orf_predict(
     manifest_path: Path,
     data_root: Path,
-    config_dir: Path,
     *,
     overwrite: bool,
     accession_filter: list[str] | None,
 ) -> int:
-    """Run the in-process QC assessor for every eligible assembly.
+    """Run ORF prediction for every eligible manifest row.
 
     Args:
         manifest_path: Phase 1 manifest path.
-        data_root: Root data directory.
-        config_dir: Config directory containing ``qc_markers.yaml``.
-        overwrite: If True, re-run even when the stamp matches.
+        data_root: Root data directory (outputs land under ``data/orfs``).
+        overwrite: If True, re-run even when stamp matches.
         accession_filter: If non-empty, restrict to these accessions.
 
     Returns:
-        Exit code (0 on success, 1 if any assembly failed, 2 on missing
-        marker DB).
+        Process exit code (0 on success, non-zero if any row errored fatally).
     """
-    config_path = config_dir / "qc_markers.yaml"
-    spec = resolve_default_spec(config_path)
-    hmm_db_path = data_root / QC_MARKERS_DIR_NAME / f"{spec.key}.hmm"
-    if not hmm_db_path.exists():
-        sys.stderr.write(
-            f"[assess] marker HMM database missing - run fetch-markers first ({hmm_db_path})\n"
-        )
-        return 2
-
-    scores_cutoff_path: Path | None = (
-        data_root / QC_MARKERS_DIR_NAME / f"{spec.key}.scores_cutoff.tsv"
-    )
-    if not scores_cutoff_path.exists():
-        scores_cutoff_path = None
-
     rows = _iter_assembly_rows(manifest_path, accession_filter)
-    orfs_dir = data_root / "orfs"
-    output_dir = data_root / QC_ASSESSOR_DIRNAME
+    output_dir = data_root / "orfs"
     phase3_manifest = data_root / "phase3_manifest.tsv"
-    cutoff_note = (
-        "with per-HMM bit-score cutoffs"
-        if scores_cutoff_path is not None
-        else "E-value-only mode (no scores_cutoff sidecar)"
-    )
-    sys.stderr.write(
-        f"[assess] {len(rows)} assembly row(s) eligible "
-        f"(markers={spec.label}, {cutoff_note})\n"
-    )
+    sys.stderr.write(f"[orf-predict] {len(rows)} assembly row(s) eligible\n")
     new_rows: list[_Phase3Row] = []
     failures = 0
     for row in rows:
         accession = row["accession"]
-        faa_path = orfs_dir / f"{accession}.faa"
-        coords_path = orfs_dir / f"{accession}.coords.tsv"
-        if not faa_path.exists() or not coords_path.exists():
-            sys.stderr.write(
-                f"  ! {accession}: missing .faa or .coords.tsv - run "
-                f"`python -m src.pipeline_phase2 orf-predict` first\n"
-            )
-            failures += 1
+        fasta_path = _resolve_genomic_fasta(row)
+        if fasta_path is None:
+            sys.stderr.write(f"  ! {accession}: genomic FASTA not found, skipping\n")
             new_rows.append(
                 _Phase3Row(
                     accession=accession,
                     source=row.get("source", ""),
-                    stage="assess",
+                    stage="orf-predict",
                     status="failed",
                     output_path="",
                     n_units=0,
                     elapsed_s=0.0,
                     completed_at=_utc_now(),
-                    note="missing .faa or .coords.tsv",
+                    note="genomic FASTA not located",
                 )
             )
+            failures += 1
             continue
         t0 = time.perf_counter()
         try:
-            result = assess_assembly(
+            result = predict_orfs(
                 accession=accession,
-                faa_path=faa_path,
-                coords_path=coords_path,
-                hmm_db_path=hmm_db_path,
+                fasta_path=fasta_path,
                 output_dir=output_dir,
-                marker_set_label=spec.label,
                 overwrite=overwrite,
-                scores_cutoff_path=scores_cutoff_path,
             )
         except Exception as exc:
             failures += 1
@@ -364,7 +293,7 @@ def cmd_assess(
                 _Phase3Row(
                     accession=accession,
                     source=row.get("source", ""),
-                    stage="assess",
+                    stage="orf-predict",
                     status="failed",
                     output_path="",
                     n_units=0,
@@ -377,274 +306,295 @@ def cmd_assess(
         elapsed = time.perf_counter() - t0
         marker = "=" if result.skipped else "+"
         sys.stderr.write(
-            f"  {marker} {accession}: completeness={result.completeness:.1f} "
-            f"contamination={result.contamination:.1f} N50={result.n50_contig} "
-            f"quality={result.qc_quality} ({elapsed:.1f}s)\n"
+            f"  {marker} {accession}: n_contigs={result.n_contigs} n_orfs={result.n_orfs} "
+            f"({elapsed:.1f}s)\n"
         )
         new_rows.append(
             _Phase3Row(
                 accession=accession,
                 source=row.get("source", ""),
-                stage="assess",
+                stage="orf-predict",
                 status="skipped" if result.skipped else "ok",
-                output_path=str(result.qc_tsv_path),
-                n_units=result.n_markers_found,
+                output_path=str(result.faa_path),
+                n_units=result.n_orfs,
                 elapsed_s=elapsed,
                 completed_at=_utc_now(),
-                note=(
-                    f"completeness={result.completeness:.2f}; "
-                    f"contamination={result.contamination:.2f}; "
-                    f"qc_quality={result.qc_quality}"
-                ),
+                note=f"n_contigs={result.n_contigs}",
             )
         )
     _upsert_phase3_rows(phase3_manifest, new_rows)
     return 1 if failures else 0
 
 
-def cmd_gen_checkm2_script(
-    manifest_path: Path,
+def cmd_build_profiles(
     data_root: Path,
+    config_dir: Path,
     *,
-    threads: int,
+    overwrite: bool,
 ) -> int:
-    """Render ``scripts/run_checkm2.sh`` for opt-in CheckM2 cross-validation."""
-    script_path = REPO_ROOT / CHECKM2_SCRIPT_RELPATH
-    phase3_manifest = data_root / "phase3_manifest.tsv"
-    t0 = time.perf_counter()
-    result = generate_checkm2_script(
-        manifest_path=manifest_path,
-        data_root=data_root,
-        script_path=script_path,
-        threads=threads,
-    )
-    elapsed = time.perf_counter() - t0
-    sys.stderr.write(
-        f"[gen-checkm2-script] wrote {result.script_path} with "
-        f"{result.n_assemblies} assemblies ({elapsed:.1f}s)\n"
-    )
-    if result.skipped_accessions:
-        sys.stderr.write(
-            f"  ! {len(result.skipped_accessions)} assemblies were skipped "
-            f"(no .faa yet): {', '.join(result.skipped_accessions[:5])}"
-            f"{'...' if len(result.skipped_accessions) > 5 else ''}\n"
-        )
-    _upsert_phase3_rows(
-        phase3_manifest,
-        [
-            _Phase3Row(
-                accession="*",
-                source="checkm2",
-                stage="gen-checkm2-script",
-                status="ok",
-                output_path=str(result.script_path),
-                n_units=result.n_assemblies,
-                elapsed_s=elapsed,
-                completed_at=_utc_now(),
-                note=f"skipped={len(result.skipped_accessions)}",
-            )
-        ],
-    )
-    return 0
-
-
-def cmd_ingest_checkm2(
-    data_root: Path,
-    *,
-    accession_filter: list[str] | None,
-) -> int:
-    """Normalize CheckM2 ``quality_report.tsv`` files into the Phase 3 schema."""
-    phase3_manifest = data_root / "phase3_manifest.tsv"
-    results_root = data_root / CHECKM2_RESULTS_DIRNAME
-    output_dir = data_root / CHECKM2_INGEST_DIRNAME
-
-    t0 = time.perf_counter()
-    ingested = ingest_all_checkm2(
-        results_root=results_root,
-        output_dir=output_dir,
-        accession_filter=accession_filter,
-    )
-    elapsed = time.perf_counter() - t0
-    sys.stderr.write(
-        f"[ingest-checkm2] ingested {len(ingested)} report(s) from {results_root} "
-        f"({elapsed:.1f}s)\n"
-    )
-    new_rows: list[_Phase3Row] = []
-    for r in ingested:
-        new_rows.append(
-            _Phase3Row(
-                accession=r.accession,
-                source="checkm2",
-                stage="ingest-checkm2",
-                status="ok",
-                output_path=str(r.normalized_path),
-                n_units=1,
-                elapsed_s=0.0,
-                completed_at=_utc_now(),
-                note=(
-                    f"completeness={r.completeness:.2f}; "
-                    f"contamination={r.contamination:.2f}; "
-                    f"qc_quality={r.qc_quality}"
-                ),
-            )
-        )
-    if new_rows:
-        _upsert_phase3_rows(phase3_manifest, new_rows)
-    return 0
-
-
-def cmd_report(
-    manifest_path: Path,
-    data_root: Path,
-) -> int:
-    """Build ``qc_report.tsv`` and ``qc_filtered_mags.tsv``."""
-    phase3_manifest = data_root / "phase3_manifest.tsv"
-    pyhmmer_dir = data_root / QC_ASSESSOR_DIRNAME
-    checkm2_dir = data_root / CHECKM2_INGEST_DIRNAME
-    farlip_per_mag_path = data_root / "farlip_hits_per_mag.tsv"
-    report_path = data_root / "qc_report.tsv"
-    filtered_path = data_root / "qc_filtered_mags.tsv"
-
-    t0 = time.perf_counter()
-    n_total, n_filtered = write_qc_reports(
-        manifest_path=manifest_path,
-        pyhmmer_qc_dir=pyhmmer_dir,
-        checkm2_ingest_dir=checkm2_dir,
-        farlip_per_mag_path=farlip_per_mag_path,
-        report_path=report_path,
-        filtered_path=filtered_path,
-    )
-    elapsed = time.perf_counter() - t0
-    sys.stderr.write(
-        f"[report] wrote {report_path} ({n_total} rows) and {filtered_path} "
-        f"({n_filtered} rows) ({elapsed:.1f}s)\n"
-    )
-    _upsert_phase3_rows(
-        phase3_manifest,
-        [
-            _Phase3Row(
-                accession="*",
-                source="report",
-                stage="report",
-                status="ok",
-                output_path=str(report_path),
-                n_units=n_total,
-                elapsed_s=elapsed,
-                completed_at=_utc_now(),
-                note=f"recommended_for_phylogeny={n_filtered}",
-            )
-        ],
-    )
-    return 0
-
-
-def cmd_update_vault(
-    manifest_path: Path,
-    data_root: Path,
-) -> int:
-    """Re-run the Obsidian export with the QC report path supplied."""
-    phase3_manifest = data_root / "phase3_manifest.tsv"
-    report_path = data_root / "farlip_hits_report.tsv"
-    per_mag_path = data_root / "farlip_hits_per_mag.tsv"
-    qc_report_path = data_root / "qc_report.tsv"
-    vault_dir = data_root / "obsidian_export"
-
-    if not report_path.exists() or not per_mag_path.exists():
-        sys.stderr.write(
-            "[update-vault] FaRLiP synteny reports missing - run "
-            "`python -m src.pipeline_phase2 parse-synteny` first\n"
-        )
-        return 2
-    if not qc_report_path.exists():
-        sys.stderr.write(
-            "[update-vault] qc_report.tsv missing - run report first\n"
-        )
-        return 2
-
-    t0 = time.perf_counter()
-    n_written = export_vault(
-        report_path=report_path,
-        per_mag_path=per_mag_path,
-        manifest_path=manifest_path,
-        vault_dir=vault_dir,
-        qc_report_path=qc_report_path,
-    )
-    elapsed = time.perf_counter() - t0
-    sys.stderr.write(
-        f"[update-vault] wrote {n_written} per-MAG markdown files (QC-aware) "
-        f"to {vault_dir} ({elapsed:.1f}s)\n"
-    )
-    _upsert_phase3_rows(
-        phase3_manifest,
-        [
-            _Phase3Row(
-                accession="*",
-                source="export",
-                stage="update-vault",
-                status="ok",
-                output_path=str(vault_dir),
-                n_units=n_written,
-                elapsed_s=elapsed,
-                completed_at=_utc_now(),
-                note="qc-aware",
-            )
-        ],
-    )
-    return 0
-
-
-def cmd_export_extremophile_vault(
-    data_root: Path,
-    *,
-    routing_log_path: Path | None = None,
-) -> int:
-    """Render the high-quality extremophile Obsidian vault.
-
-    Reads ``data/qc_filtered_mags.tsv`` (the Phase 3
-    ``recommended_for_phylogeny`` view) plus, if present, the Phase 1.5
-    routing log ``data/ssu/routing_log.tsv`` and writes a per-MAG markdown
-    note under ``data/extremophile_vault/`` plus the
-    ``High_Quality_Extremophile_Genomes.md`` master index.
-
-    Idempotent (per-MAG files are overwritten).
+    """Build the 21 FaRLiP HMM profiles from JSC-1.
 
     Args:
         data_root: Root data directory.
-        routing_log_path: Override for the Phase 1.5 routing log path.
-            Defaults to ``data_root/ssu/routing_log.tsv``; when the file is
-            missing, ``Taxonomic_Placement`` slots are left empty.
+        config_dir: Directory containing ``farlip_genes.yaml``.
+        overwrite: If True, rebuild even when the HMM file exists.
 
     Returns:
-        Exit code (0 on success, 2 when the filtered TSV is missing).
+        Process exit code (0 on success).
     """
+    output_dir = data_root / "hmm_profiles"
     phase3_manifest = data_root / "phase3_manifest.tsv"
-    filtered_path = data_root / "qc_filtered_mags.tsv"
-    vault_dir = data_root / EXTREMOPHILE_VAULT_DIRNAME
+    jsc1_dir = (
+        data_root
+        / "references"
+        / REFERENCE_ACCESSION
+        / "ncbi_dataset"
+        / "data"
+        / REFERENCE_ACCESSION
+    )
+    gff_path = jsc1_dir / "genomic.gff"
+    faa_path = jsc1_dir / "protein.faa"
+    catalog_path = config_dir / "farlip_genes.yaml"
 
-    if not filtered_path.exists():
+    if not gff_path.exists() or not faa_path.exists():
         sys.stderr.write(
-            f"[export-extremophile-vault] {filtered_path} missing - run report first.\n"
+            f"[build-profiles] missing JSC-1 GFF or protein FASTA under {jsc1_dir}\n"
         )
         return 2
 
-    if routing_log_path is None:
-        routing_log_path = data_root / "ssu" / ROUTING_LOG_FILENAME
-    routing_arg = routing_log_path if routing_log_path.exists() else None
-    if routing_arg is None:
-        sys.stderr.write(
-            f"[export-extremophile-vault] routing log {routing_log_path} not present; "
-            "Taxonomic_Placement frontmatter will be left blank.\n"
-        )
-
     t0 = time.perf_counter()
-    n_written = export_extremophile_vault(
-        filtered_csv_path=filtered_path,
-        vault_dir=vault_dir,
-        routing_log_path=routing_arg,
+    resolved = build_profiles(
+        catalog_path=catalog_path,
+        gff_path=gff_path,
+        protein_faa_path=faa_path,
+        output_dir=output_dir,
+        overwrite=overwrite,
     )
     elapsed = time.perf_counter() - t0
     sys.stderr.write(
-        f"[export-extremophile-vault] wrote {n_written} per-MAG markdown file(s) "
+        f"[build-profiles] resolved {len(resolved)} catalog entries -> "
+        f"{output_dir / 'farlip_21.hmm'} ({elapsed:.1f}s)\n"
+    )
+
+    _upsert_phase3_rows(
+        phase3_manifest,
+        [
+            _Phase3Row(
+                accession=REFERENCE_ACCESSION,
+                source="JSC-1",
+                stage="build-profiles",
+                status="ok",
+                output_path=str(output_dir / "farlip_21.hmm"),
+                n_units=len(resolved),
+                elapsed_s=elapsed,
+                completed_at=_utc_now(),
+                note=f"{len([g for g in resolved if g.in_cluster])} of {len(resolved)} in cluster",
+            )
+        ],
+    )
+    return 0
+
+
+def cmd_search(
+    manifest_path: Path,
+    data_root: Path,
+    *,
+    overwrite: bool,
+    accession_filter: list[str] | None,
+) -> int:
+    """Run hmmsearch for every accession with an existing ``.faa``.
+
+    Args:
+        manifest_path: Phase 1 manifest path.
+        data_root: Root data directory.
+        overwrite: If True, re-run even when ``.domtblout`` exists.
+        accession_filter: If non-empty, restrict to these accessions.
+
+    Returns:
+        Process exit code (0 on success).
+    """
+    rows = _iter_assembly_rows(manifest_path, accession_filter)
+    orfs_dir = data_root / "orfs"
+    output_dir = data_root / "hmm_results"
+    hmm_path = data_root / "hmm_profiles" / "farlip_21.hmm"
+    phase3_manifest = data_root / "phase3_manifest.tsv"
+
+    if not hmm_path.exists():
+        sys.stderr.write(
+            f"[search] HMM file missing - run build-profiles first ({hmm_path})\n"
+        )
+        return 2
+
+    sys.stderr.write(f"[search] {len(rows)} assembly row(s) eligible\n")
+    new_rows: list[_Phase3Row] = []
+    failures = 0
+    for row in rows:
+        accession = row["accession"]
+        faa_path = orfs_dir / f"{accession}.faa"
+        if not faa_path.exists():
+            sys.stderr.write(
+                f"  ! {accession}: missing {faa_path.name} - run orf-predict first\n"
+            )
+            failures += 1
+            continue
+        t0 = time.perf_counter()
+        try:
+            result = run_search(
+                accession=accession,
+                faa_path=faa_path,
+                hmm_path=hmm_path,
+                output_dir=output_dir,
+                overwrite=overwrite,
+            )
+        except Exception as exc:
+            failures += 1
+            elapsed = time.perf_counter() - t0
+            sys.stderr.write(f"  ! {accession}: {exc}\n")
+            new_rows.append(
+                _Phase3Row(
+                    accession=accession,
+                    source=row.get("source", ""),
+                    stage="search",
+                    status="failed",
+                    output_path="",
+                    n_units=0,
+                    elapsed_s=elapsed,
+                    completed_at=_utc_now(),
+                    note=str(exc),
+                )
+            )
+            continue
+        elapsed = time.perf_counter() - t0
+        marker = "=" if result.skipped else "+"
+        sys.stderr.write(
+            f"  {marker} {accession}: hits={result.n_hits_reported} "
+            f"hmms_with_hits={result.n_hmms_with_hits} ({elapsed:.1f}s)\n"
+        )
+        new_rows.append(
+            _Phase3Row(
+                accession=accession,
+                source=row.get("source", ""),
+                stage="search",
+                status="skipped" if result.skipped else "ok",
+                output_path=str(result.domtblout_path),
+                n_units=result.n_hits_reported,
+                elapsed_s=elapsed,
+                completed_at=_utc_now(),
+                note=f"hmms_with_hits={result.n_hmms_with_hits}",
+            )
+        )
+    _upsert_phase3_rows(phase3_manifest, new_rows)
+    return 1 if failures else 0
+
+
+def cmd_parse_synteny(
+    manifest_path: Path,
+    data_root: Path,
+    *,
+    overwrite: bool,
+) -> int:
+    """Classify every MAG's HMM hits and write the two synteny reports.
+
+    Args:
+        manifest_path: Phase 1 manifest path.
+        data_root: Root data directory.
+        overwrite: Currently unused (the reports are always rewritten end-to-end -
+            the flag is accepted for CLI symmetry with the other subcommands).
+
+    Returns:
+        Process exit code (0 on success).
+    """
+    del overwrite
+    rows = _iter_assembly_rows(manifest_path, None)
+    orfs_dir = data_root / "orfs"
+    hmm_results_dir = data_root / "hmm_results"
+    report_path = data_root / "farlip_hits_report.tsv"
+    per_mag_path = data_root / "farlip_hits_per_mag.tsv"
+    phase3_manifest = data_root / "phase3_manifest.tsv"
+
+    sys.stderr.write(f"[parse-synteny] {len(rows)} assembly row(s) eligible\n")
+    all_calls = {}
+    new_rows: list[_Phase3Row] = []
+    for row in rows:
+        accession = row["accession"]
+        coords_path = orfs_dir / f"{accession}.coords.tsv"
+        domtblout_path = hmm_results_dir / f"{accession}.domtblout"
+        if not coords_path.exists() or not domtblout_path.exists():
+            sys.stderr.write(
+                f"  ! {accession}: missing coords or domtblout - skipping\n"
+            )
+            continue
+        t0 = time.perf_counter()
+        calls = classify_mag(accession, coords_path, domtblout_path)
+        elapsed = time.perf_counter() - t0
+        all_calls[accession] = calls
+        top = (
+            max(
+                (c.classification.value for c in calls),
+                key=lambda v: _CLASSIFICATION_DISPLAY_PRIORITY.get(v, -1),
+            )
+            if calls
+            else Classification.NONE.value
+        )
+        sys.stderr.write(
+            f"  + {accession}: candidate_contigs={len(calls)} top={top} ({elapsed:.2f}s)\n"
+        )
+        new_rows.append(
+            _Phase3Row(
+                accession=accession,
+                source=row.get("source", ""),
+                stage="parse-synteny",
+                status="ok",
+                output_path=str(report_path),
+                n_units=len(calls),
+                elapsed_s=elapsed,
+                completed_at=_utc_now(),
+                note=f"top_classification={top}",
+            )
+        )
+
+    write_reports(all_calls, report_path, per_mag_path)
+    sys.stderr.write(
+        f"[parse-synteny] wrote {report_path} and {per_mag_path}\n"
+    )
+    _upsert_phase3_rows(phase3_manifest, new_rows)
+    return 0
+
+
+def cmd_export_vault(
+    manifest_path: Path,
+    data_root: Path,
+    *,
+    overwrite: bool,
+) -> int:
+    """Render the Obsidian vault from the synteny reports.
+
+    Args:
+        manifest_path: Phase 1 manifest (read for scientific_name lookup).
+        data_root: Root data directory.
+        overwrite: Currently unused (the exporter always overwrites; flag kept for
+            CLI symmetry).
+
+    Returns:
+        Process exit code (0 on success).
+    """
+    del overwrite
+    report_path = data_root / "farlip_hits_report.tsv"
+    per_mag_path = data_root / "farlip_hits_per_mag.tsv"
+    vault_dir = data_root / "obsidian_export"
+    phase3_manifest = data_root / "phase3_manifest.tsv"
+
+    if not report_path.exists() or not per_mag_path.exists():
+        sys.stderr.write(
+            "[export-vault] synteny reports missing - run parse-synteny first\n"
+        )
+        return 2
+
+    t0 = time.perf_counter()
+    n_written = export_vault(report_path, per_mag_path, manifest_path, vault_dir)
+    elapsed = time.perf_counter() - t0
+    sys.stderr.write(
+        f"[export-vault] wrote {n_written} per-MAG markdown files + master index "
         f"to {vault_dir} ({elapsed:.1f}s)\n"
     )
     _upsert_phase3_rows(
@@ -653,17 +603,13 @@ def cmd_export_extremophile_vault(
             _Phase3Row(
                 accession="*",
                 source="export",
-                stage="export-extremophile-vault",
+                stage="export-vault",
                 status="ok",
                 output_path=str(vault_dir),
                 n_units=n_written,
                 elapsed_s=elapsed,
                 completed_at=_utc_now(),
-                note=(
-                    "routing-aware"
-                    if routing_arg is not None
-                    else "placement placeholders empty"
-                ),
+                note="",
             )
         ],
     )
@@ -671,34 +617,40 @@ def cmd_export_extremophile_vault(
 
 
 def cmd_status(manifest_path: Path, data_root: Path) -> int:
-    """Print a one-screen summary of Phase 3 state."""
-    rows = _iter_assembly_rows(manifest_path, None)
-    qc_dir = data_root / QC_ASSESSOR_DIRNAME
-    ingest_dir = data_root / CHECKM2_INGEST_DIRNAME
-    qc_markers_dir = data_root / QC_MARKERS_DIR_NAME
+    """Print a one-screen summary of pipeline state.
 
-    n_pyhmmer = sum(1 for r in rows if (qc_dir / f"{r['accession']}.qc.tsv").exists())
-    n_checkm2 = sum(
-        1 for r in rows if (ingest_dir / f"{r['accession']}.qc.tsv").exists()
+    Args:
+        manifest_path: Phase 1 manifest.
+        data_root: Root data directory.
+
+    Returns:
+        Always 0.
+    """
+    rows = _iter_assembly_rows(manifest_path, None)
+    orfs_dir = data_root / "orfs"
+    hmm_results_dir = data_root / "hmm_results"
+    hmm_path = data_root / "hmm_profiles" / "farlip_21.hmm"
+    report_path = data_root / "farlip_hits_report.tsv"
+    vault_dir = data_root / "obsidian_export"
+
+    n_with_orfs = sum(
+        1 for r in rows if (orfs_dir / f"{r['accession']}.faa").exists()
     )
-    has_markers = any(qc_markers_dir.glob("*.hmm")) if qc_markers_dir.exists() else False
-    report_path = data_root / "qc_report.tsv"
-    filtered_path = data_root / "qc_filtered_mags.tsv"
-    extremophile_dir = data_root / EXTREMOPHILE_VAULT_DIRNAME
-    extremophile_index = (
-        extremophile_dir / "High_Quality_Extremophile_Genomes.md"
+    n_with_hits = sum(
+        1
+        for r in rows
+        if (hmm_results_dir / f"{r['accession']}.domtblout").exists()
     )
 
     sys.stdout.write(
         "FaRLiP Phase 3 status\n"
-        f"  assembly rows in manifest    : {len(rows)}\n"
-        f"  marker HMM database present  : {'yes' if has_markers else 'no'}\n"
-        f"  pyhmmer QC TSVs              : {n_pyhmmer}\n"
-        f"  CheckM2 QC TSVs (ingested)   : {n_checkm2}\n"
-        f"  qc_report.tsv present        : {'yes' if report_path.exists() else 'no'}\n"
-        f"  qc_filtered_mags.tsv present : {'yes' if filtered_path.exists() else 'no'}\n"
-        f"  extremophile vault index     : "
-        f"{'yes' if extremophile_index.exists() else 'no'}\n"
+        f"  assembly rows in manifest : {len(rows)}\n"
+        f"  ORFs predicted (.faa)      : {n_with_orfs}\n"
+        f"  hmmsearch outputs          : {n_with_hits}\n"
+        f"  farlip_21.hmm present      : {'yes' if hmm_path.exists() else 'no'}\n"
+        f"  synteny report present     : {'yes' if report_path.exists() else 'no'}\n"
+        f"  Obsidian vault populated   : "
+        f"{'yes' if vault_dir.exists() and any(vault_dir.iterdir()) else 'no'}\n"
     )
     return 0
 
@@ -745,63 +697,34 @@ def _build_parser() -> argparse.ArgumentParser:
     )
 
     sub.add_parser(
-        "fetch-markers",
-        parents=[common_overwrite],
-        help="Download the configured single-copy marker HMM set.",
-    )
-    sub.add_parser(
-        "assess",
+        "orf-predict",
         parents=[common_overwrite, common_filter],
-        help="Run the in-process pyhmmer QC assessor for every assembly.",
-    )
-    gen_p = sub.add_parser(
-        "gen-checkm2-script",
-        help="Generate scripts/run_checkm2.sh for opt-in CheckM2 cross-validation.",
-    )
-    gen_p.add_argument(
-        "--threads",
-        type=int,
-        default=CHECKM2_THREADS_DEFAULT,
-        help=f"Threads for each `checkm2 predict` call (default: {CHECKM2_THREADS_DEFAULT}).",
+        help="Run pyrodigal meta-mode ORF prediction for every assembly row.",
     )
     sub.add_parser(
-        "ingest-checkm2",
-        parents=[common_filter],
-        help="Normalize CheckM2 quality_report.tsv outputs into the QC schema.",
+        "build-profiles",
+        parents=[common_overwrite],
+        help="Build the 21 FaRLiP HMM profiles from JSC-1.",
     )
     sub.add_parser(
-        "report",
-        help="Join QC sources with the manifest + FaRLiP roll-up into qc_report.tsv.",
+        "search",
+        parents=[common_overwrite, common_filter],
+        help="Run hmmsearch for every per-MAG protein set.",
     )
     sub.add_parser(
-        "update-vault",
-        help="Re-render the Obsidian vault with QC frontmatter merged in.",
+        "parse-synteny",
+        parents=[common_overwrite],
+        help="Classify hits with the FaRLiP synteny rule and write reports.",
     )
-    extremophile_p = sub.add_parser(
-        "export-extremophile-vault",
-        help=(
-            "Render data/extremophile_vault/ "
-            "(High_Quality_Extremophile_Genomes.md + per-MAG notes) from "
-            "data/qc_filtered_mags.tsv."
-        ),
-    )
-    extremophile_p.add_argument(
-        "--routing-log",
-        type=Path,
-        default=None,
-        help=(
-            "Override path to the Phase 1.5 routing log (default: "
-            "<data-root>/ssu/routing_log.tsv). When missing, "
-            "Taxonomic_Placement is left blank."
-        ),
+    sub.add_parser(
+        "export-vault",
+        parents=[common_overwrite],
+        help="Render the Obsidian vault from the synteny reports.",
     )
     sub.add_parser(
         "all",
         parents=[common_overwrite],
-        help=(
-            "Run fetch-markers -> assess -> gen-checkm2-script -> report -> "
-            "update-vault -> export-extremophile-vault."
-        ),
+        help="Run orf-predict -> build-profiles -> search -> parse-synteny -> export-vault.",
     )
     sub.add_parser(
         "status",
@@ -814,7 +737,7 @@ def main(argv: list[str] | None = None) -> int:
     """Entry point for ``python -m src.pipeline_phase3``.
 
     Args:
-        argv: Override for ``sys.argv[1:]`` (used by tests).
+        argv: Override for sys.argv[1:] (used by tests).
 
     Returns:
         Process exit code.
@@ -827,61 +750,28 @@ def main(argv: list[str] | None = None) -> int:
     cmd = args.cmd
     accession_filter = getattr(args, "accession", None) or None
     overwrite = bool(getattr(args, "overwrite", False))
-    threads = int(getattr(args, "threads", CHECKM2_THREADS_DEFAULT))
 
-    if cmd == "fetch-markers":
-        return cmd_fetch_markers(
-            config_dir,
-            data_root,
-            overwrite=overwrite,
-            manifest_path=manifest_path,
+    if cmd == "orf-predict":
+        return cmd_orf_predict(
+            manifest_path, data_root, overwrite=overwrite, accession_filter=accession_filter
         )
-    if cmd == "assess":
-        return cmd_assess(
-            manifest_path,
-            data_root,
-            config_dir,
-            overwrite=overwrite,
-            accession_filter=accession_filter,
+    if cmd == "build-profiles":
+        return cmd_build_profiles(data_root, config_dir, overwrite=overwrite)
+    if cmd == "search":
+        return cmd_search(
+            manifest_path, data_root, overwrite=overwrite, accession_filter=accession_filter
         )
-    if cmd == "gen-checkm2-script":
-        return cmd_gen_checkm2_script(
-            manifest_path,
-            data_root,
-            threads=threads,
-        )
-    if cmd == "ingest-checkm2":
-        return cmd_ingest_checkm2(
-            data_root,
-            accession_filter=accession_filter,
-        )
-    if cmd == "report":
-        return cmd_report(manifest_path, data_root)
-    if cmd == "update-vault":
-        return cmd_update_vault(manifest_path, data_root)
-    if cmd == "export-extremophile-vault":
-        return cmd_export_extremophile_vault(
-            data_root,
-            routing_log_path=getattr(args, "routing_log", None),
-        )
+    if cmd == "parse-synteny":
+        return cmd_parse_synteny(manifest_path, data_root, overwrite=overwrite)
+    if cmd == "export-vault":
+        return cmd_export_vault(manifest_path, data_root, overwrite=overwrite)
     if cmd == "all":
         for step in (
-            lambda: cmd_fetch_markers(
-                config_dir, data_root, overwrite=overwrite, manifest_path=manifest_path
-            ),
-            lambda: cmd_assess(
-                manifest_path,
-                data_root,
-                config_dir,
-                overwrite=overwrite,
-                accession_filter=None,
-            ),
-            lambda: cmd_gen_checkm2_script(
-                manifest_path, data_root, threads=CHECKM2_THREADS_DEFAULT
-            ),
-            lambda: cmd_report(manifest_path, data_root),
-            lambda: cmd_update_vault(manifest_path, data_root),
-            lambda: cmd_export_extremophile_vault(data_root),
+            lambda: cmd_orf_predict(manifest_path, data_root, overwrite=overwrite, accession_filter=None),
+            lambda: cmd_build_profiles(data_root, config_dir, overwrite=overwrite),
+            lambda: cmd_search(manifest_path, data_root, overwrite=overwrite, accession_filter=None),
+            lambda: cmd_parse_synteny(manifest_path, data_root, overwrite=overwrite),
+            lambda: cmd_export_vault(manifest_path, data_root, overwrite=overwrite),
         ):
             rc = step()
             if rc != 0:

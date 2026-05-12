@@ -1,9 +1,9 @@
-"""Phase 1.5 SSU rRNA extraction.
+"""Phase 2 SSU rRNA extraction.
 
 Wraps the ``barrnap`` rRNA detector (Seemann 2013,
 ``https://github.com/tseemann/barrnap``) and pulls every predicted 16S rRNA
 sequence out of a Phase 1 MAG FASTA. The output of this module is the input to
-both downstream paths the Phase 1.5 plan calls for:
+both downstream paths the Phase 2 plan calls for:
 
 * MAGs that yielded at least one 16S record are routed to the SILVA SINA
   multi-FASTA bundle (:mod:`src.ssu_bundler`).
@@ -18,7 +18,7 @@ The public surface is three callables:
 * :func:`extract_16S` - parses that GFF3 and slices the matching sub-sequences
   out of the same FASTA, returning a list of :class:`Ssu16SRecord` tuples.
 * :func:`assess_mag_for_ssu` - end-to-end per-MAG entry point used by the
-  Phase 1.5 CLI: runs barrnap, extracts 16S, writes
+  Phase 2 CLI: runs barrnap, extracts 16S, writes
   ``data/ssu/<accession>.16S.fasta``, and returns a routing decision plus
   metadata.
 
@@ -321,7 +321,7 @@ def run_barrnap(
     if not is_barrnap_available(barrnap_binary):
         raise BarrnapError(
             f"barrnap binary '{barrnap_binary}' not found on PATH; "
-            "install barrnap (e.g. via conda-forge / bioconda) before running Phase 1.5"
+            "install barrnap (e.g. via conda-forge / bioconda) before running Phase 2"
         )
 
     plain_fasta, is_tmp = _materialize_plain_fasta(fasta_path)
@@ -562,7 +562,7 @@ def assess_mag_for_ssu(
 
     Returns:
         A :class:`SsuAssessment`. The decision tag is the routing signal
-        consumed by Phase 1.5 downstream stages.
+        consumed by Phase 2 downstream stages.
 
     Raises:
         FileNotFoundError: If ``fasta_path`` does not exist.

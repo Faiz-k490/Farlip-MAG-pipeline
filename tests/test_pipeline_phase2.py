@@ -1,4 +1,4 @@
-"""Tests for the Phase 1.5 CLI orchestrator (``src.pipeline_phase1_5``).
+"""Tests for the Phase 2 CLI orchestrator (``src.pipeline_phase2``).
 
 Targets argparse wiring + exit-code semantics. Subprocess (barrnap) is mocked
 the same way ``test_ssu_extractor`` does it, so the suite stays offline and
@@ -13,7 +13,7 @@ from pathlib import Path
 
 import pytest
 
-from src import pipeline_phase1_5 as p15
+from src import pipeline_phase2 as p15
 from src import ssu_extractor as ssu
 
 
@@ -130,8 +130,8 @@ def test_extract_16S_writes_routing_log_and_per_mag_outputs(
     log_body = (data_root / "ssu" / "routing_log.tsv").read_text(encoding="utf-8")
     assert "GCA_TEST" in log_body
     assert ssu.SSU_DECISION_SILVA in log_body
-    # Phase 1.5 manifest gets a row, too.
-    phase15 = data_root / "phase1_5_manifest.tsv"
+    # Phase 2 manifest gets a row, too.
+    phase15 = data_root / "phase2_manifest.tsv"
     assert phase15.exists()
     assert "extract-16S" in phase15.read_text(encoding="utf-8")
 
@@ -141,7 +141,7 @@ def test_status_smoke_runs_with_no_outputs(tmp_path: Path, capsys):
     rc = p15.cmd_status(tmp_path / "data")
     assert rc == 0
     out = capsys.readouterr().out
-    assert "Phase 1.5 status" in out
+    assert "Phase 2 status" in out
 
 
 def test_bundle_silva_returns_2_without_routing_log(tmp_path: Path):

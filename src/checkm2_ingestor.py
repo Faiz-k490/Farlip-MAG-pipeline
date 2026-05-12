@@ -1,4 +1,4 @@
-"""Normalize CheckM2 ``quality_report.tsv`` outputs into the Phase 3 QC schema.
+"""Normalize CheckM2 ``quality_report.tsv`` outputs into the Phase 4 QC schema.
 
 CheckM2 (Chklovski et al. 2023, *Nat Methods* 20:1203) is invoked via the
 shell script emitted by :mod:`src.checkm2_shellscript_generator`. Each
@@ -165,7 +165,7 @@ def ingest_checkm2_report(
     quality_report_path: Path,
     output_dir: Path,
 ) -> CheckM2Ingested:
-    """Translate one CheckM2 ``quality_report.tsv`` into the Phase 3 schema.
+    """Translate one CheckM2 ``quality_report.tsv`` into the Phase 4 schema.
 
     Args:
         accession: MAG accession (drives the output filename).

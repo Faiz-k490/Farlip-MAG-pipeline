@@ -1,29 +1,27 @@
-"""CLI orchestrator for the FaRLiP detection pipeline (Phase 2).
+"""CLI orchestrator for the Phase 2 SSU + taxonomic-routing pipeline.
 
-Reads the Phase 1 manifest (``data/manifest.tsv``) and runs - in order, or as
-individually-invoked subcommands - the four-stage detection pipeline:
+Reads the Phase 1 manifest (``data/manifest.tsv``) and routes every assembly
+row through 16S extraction:
 
-1. **orf-predict** - :func:`src.orf_predictor.predict_orfs` for every assembly row
-   in the manifest (NCBI + ENA sources; SILVA and GTDB rows are skipped).
-2. **build-profiles** - :func:`src.profile_builder.build_profiles` against the JSC-1
-   reference assembly. Produces ``data/hmm_profiles/farlip_21.hmm``.
-3. **search** - :func:`src.hmm_searcher.run_search` for every per-MAG ``.faa``.
-4. **parse-synteny** - :func:`src.synteny_parser.classify_mag` and reports.
-5. **export-vault** - :func:`src.obsidian_exporter.export_vault`.
+1. **extract-16S** - run :func:`src.ssu_extractor.assess_mag_for_ssu` per
+   assembly. Each call writes ``data/ssu/<acc>.barrnap.gff`` plus
+   ``data/ssu/<acc>.16S.fasta`` (empty file when no 16S is found) and an
+   idempotency stamp; the routing log is upserted in place.
+2. **bundle-silva** - concatenate every ``decision == silva`` MAG's 16S
+   FASTA into ``data/ssu/silva_sina_input.fasta`` for SILVA SINA submission.
+3. **gen-gtdbtk-script** - render ``scripts/run_gtdbtk.sh`` plus
+   ``data/ssu/gtdbtk_batchfile.tsv`` for every ``decision == gtdbtk`` MAG.
+4. **all** - run 1 -> 2 -> 3 in order.
+5. **status** - one-screen summary of routing-log decisions and asset
+   presence.
 
-Every subcommand is independently re-runnable and idempotent. Phase 2 progress is
-tracked in ``data/phase2_manifest.tsv`` (one row per accession per stage), so a
+Every subcommand is idempotent. Phase 2 progress is recorded in
+``data/phase2_manifest.tsv`` (one row per ``(accession, stage)``) so a
 partial ``all`` run can resume from where it stopped.
 
-Subcommands (see ``python -m src.pipeline_phase2 --help``):
-
-* ``orf-predict   [--overwrite] [--accession ...]``
-* ``build-profiles [--overwrite]``
-* ``search         [--overwrite] [--accession ...]``
-* ``parse-synteny  [--overwrite]``
-* ``export-vault   [--overwrite]``
-* ``all            [--overwrite]``
-* ``status``
+The pipeline never invokes SILVA SINA or GTDB-Tk itself - those tools require
+large reference data and/or web submission. Phase 2 only **prepares** their
+inputs.
 """
 
 from __future__ import annotations
@@ -35,37 +33,44 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 
+from .gtdbtk_shellscript_generator import (
+    GTDBTK_SCRIPT_RELPATH,
+    GTDBTK_THREADS_DEFAULT,
+    generate_gtdbtk_script,
+)
 from .manifest import read_manifest
-from .orf_predictor import predict_orfs
-from .profile_builder import build_profiles
-from .hmm_searcher import run_search
-from .synteny_parser import Classification, classify_mag, write_reports
-
-
-_CLASSIFICATION_DISPLAY_PRIORITY: dict[str, int] = {
-    Classification.FULL_CLUSTER.value: 3,
-    Classification.EDGE_TRUNCATED.value: 2,
-    Classification.PARTIAL_CLUSTER.value: 1,
-    Classification.NONE.value: 0,
-}
-"""Priority used to pick a per-MAG headline classification for stderr logging."""
-from .obsidian_exporter import export_vault
+from .ssu_bundler import (
+    ROUTING_LOG_FILENAME,
+    SILVA_SINA_BUNDLE_FILENAME,
+    bundle_silva_sina,
+    read_routing_log,
+    routing_decision_from_assessment,
+    upsert_routing_log,
+)
+from .ssu_extractor import (
+    BARRNAP_DEFAULT_EVALUE,
+    BARRNAP_DEFAULT_REJECT,
+    BARRNAP_DEFAULT_THREADS,
+    BARRNAP_KINGDOM_BACTERIA,
+    BarrnapError,
+    SSU_DECISION_GTDBTK,
+    SSU_DECISION_SILVA,
+    assess_mag_for_ssu,
+    is_barrnap_available,
+)
 
 
 REPO_ROOT: Path = Path(__file__).resolve().parent.parent
 """Repository root, derived from this module's location."""
 
 DEFAULT_DATA_ROOT: Path = REPO_ROOT / "data"
-"""Root of all pipeline outputs. Phase 1 already wrote into this directory."""
+"""Root of all pipeline outputs."""
 
 DEFAULT_MANIFEST: Path = DEFAULT_DATA_ROOT / "manifest.tsv"
-"""Phase 1 manifest, consumed read-only by Phase 2."""
+"""Phase 1 manifest, read-only here."""
 
-DEFAULT_CONFIG_DIR: Path = REPO_ROOT / "config"
-"""Directory containing ``farlip_genes.yaml``."""
-
-REFERENCE_ACCESSION: str = "GCF_000733415.1"
-"""Primary FaRLiP reference (JSC-1). Profiles are built from this assembly."""
+SSU_DIRNAME: str = "ssu"
+"""Subdirectory under ``data/`` that Phase 2 writes into."""
 
 PHASE2_MANIFEST_COLUMNS: tuple[str, ...] = (
     "accession",
@@ -78,15 +83,14 @@ PHASE2_MANIFEST_COLUMNS: tuple[str, ...] = (
     "completed_at",
     "note",
 )
-"""Column order for ``data/phase2_manifest.tsv``. Stable; extended only by appending."""
+"""Column order for ``data/phase2_manifest.tsv``."""
 
-NON_ASSEMBLY_SOURCES: frozenset[str] = frozenset({"SILVA", "GTDB"})
-"""Manifest sources whose rows are skipped during ORF prediction (these are reference
-databases, not genome assemblies)."""
+NON_ASSEMBLY_SOURCES: frozenset[str] = frozenset({"SILVA", "GTDB", "QC_MARKERS"})
+"""Manifest sources whose rows are skipped during 16S extraction."""
 
 
 @dataclass
-class _Phase2Row:
+class _PhaseRow:
     """One row written to ``data/phase2_manifest.tsv``."""
 
     accession: str
@@ -101,32 +105,20 @@ class _Phase2Row:
 
 
 def _utc_now() -> str:
-    """Return a UTC ISO-8601 timestamp matching the Phase 1 manifest convention."""
+    """Return a UTC ISO-8601 timestamp matching the Phase 1/2/3 manifests."""
     return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
 
 
-def _read_phase2_manifest(path: Path) -> list[dict[str, str]]:
-    """Load ``data/phase2_manifest.tsv`` if it exists.
-
-    Args:
-        path: Manifest path.
-
-    Returns:
-        Rows as dicts (empty list if file absent).
-    """
+def _read_phase_manifest(path: Path) -> list[dict[str, str]]:
+    """Load ``data/phase2_manifest.tsv`` if it exists."""
     if not path.exists():
         return []
     with path.open("r", encoding="utf-8") as fh:
         return list(csv.DictReader(fh, delimiter="\t"))
 
 
-def _write_phase2_manifest(path: Path, rows: list[dict[str, str]]) -> None:
-    """Write a Phase 2 manifest TSV with the canonical column order.
-
-    Args:
-        path: Output path. Parent created if missing.
-        rows: Iterable of row dicts. Missing columns are filled with empty strings.
-    """
+def _write_phase_manifest(path: Path, rows: list[dict[str, str]]) -> None:
+    """Write the Phase 2 manifest TSV using the canonical column order."""
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("w", encoding="utf-8") as fh:
         writer = csv.DictWriter(
@@ -140,14 +132,9 @@ def _write_phase2_manifest(path: Path, rows: list[dict[str, str]]) -> None:
             writer.writerow({col: row.get(col, "") for col in PHASE2_MANIFEST_COLUMNS})
 
 
-def _upsert_phase2_rows(path: Path, new_rows: list[_Phase2Row]) -> None:
-    """Merge new rows into the Phase 2 manifest, replacing on ``(accession, stage)``.
-
-    Args:
-        path: Manifest path.
-        new_rows: Rows to merge in.
-    """
-    existing = _read_phase2_manifest(path)
+def _upsert_phase_rows(path: Path, new_rows: list[_PhaseRow]) -> None:
+    """Merge new rows into the Phase 2 manifest, replacing on (accession, stage)."""
+    existing = _read_phase_manifest(path)
     keyed: dict[tuple[str, str], dict[str, str]] = {
         (r.get("accession", ""), r.get("stage", "")): r for r in existing
     }
@@ -163,137 +150,162 @@ def _upsert_phase2_rows(path: Path, new_rows: list[_Phase2Row]) -> None:
             "completed_at": r.completed_at,
             "note": r.note,
         }
-    _write_phase2_manifest(path, list(keyed.values()))
-
-
-def _resolve_genomic_fasta(row: dict[str, str]) -> Path | None:
-    """Locate the genomic FASTA for one Phase 1 manifest row.
-
-    NCBI rows use the unpacked ``ncbi_dataset/data/<accession>/*_genomic.fna``
-    inside ``extracted_dir``; ENA rows use ``local_path`` directly.
-
-    Args:
-        row: One Phase 1 manifest row.
-
-    Returns:
-        Absolute path to the genomic FASTA, or ``None`` if the file cannot be
-        located. Returning ``None`` lets the caller skip cleanly rather than
-        crashing the whole sweep on one bad row.
-    """
-    source = row.get("source", "")
-    accession = row.get("accession", "")
-    if source == "NCBI":
-        extracted_dir = row.get("extracted_dir", "")
-        if not extracted_dir:
-            return None
-        base = Path(extracted_dir) / "ncbi_dataset" / "data" / accession
-        if not base.exists():
-            return None
-        candidates = sorted(base.glob("*_genomic.fna"))
-        if candidates:
-            return candidates[0]
-        candidates = sorted(base.glob("*.fna"))
-        return candidates[0] if candidates else None
-    if source == "ENA":
-        local_path = row.get("local_path", "")
-        if not local_path:
-            return None
-        p = Path(local_path)
-        return p if p.exists() else None
-    return None
+    _write_phase_manifest(path, list(keyed.values()))
 
 
 def _iter_assembly_rows(
     manifest_path: Path,
     accession_filter: list[str] | None = None,
 ) -> list[dict[str, str]]:
-    """Yield every manifest row eligible for ORF prediction / search.
-
-    Args:
-        manifest_path: Phase 1 manifest path.
-        accession_filter: If non-empty, restrict to these accessions.
-
-    Returns:
-        List of manifest rows in file order.
-    """
+    """Yield every Phase 1 manifest row eligible for 16S extraction."""
     rows = read_manifest(manifest_path)
     out: list[dict[str, str]] = []
     filter_set = set(accession_filter or [])
+    seen: set[str] = set()
     for row in rows:
-        # ``ok`` = freshly downloaded this run; ``skipped`` = already on disk and
-        # left in place by an idempotent re-fetch. Both states mean the artifact
-        # exists locally and is eligible for Phase 2 processing.
-        if row.get("status") not in {"ok", "skipped"}:
+        accession = row.get("accession", "")
+        source = row.get("source", "")
+        status = row.get("status", "")
+        if not accession or accession in seen:
             continue
-        if row.get("source", "") in NON_ASSEMBLY_SOURCES:
+        if source in NON_ASSEMBLY_SOURCES:
             continue
-        if filter_set and row.get("accession", "") not in filter_set:
+        if status not in {"ok", "skipped"}:
             continue
+        if filter_set and accession not in filter_set:
+            continue
+        seen.add(accession)
         out.append(row)
     return out
 
 
-def cmd_orf_predict(
+def _resolve_assembly_fasta(row: dict[str, str], data_root: Path) -> Path | None:
+    """Resolve the FASTA path for a Phase 1 manifest row.
+
+    NCBI assemblies arrive as ZIP bundles; the unpacked genomic FASTA lives
+    under ``data/.../<accession>/ncbi_dataset/data/<accession>/*_genomic.fna``
+    or similar. ENA assemblies arrive as ``<accession>.fasta.gz`` written
+    directly to ``local_path``.
+
+    Args:
+        row: Manifest row.
+        data_root: Root data directory (used to resolve relative
+            ``extracted_dir`` columns).
+
+    Returns:
+        Absolute path to a FASTA file, or ``None`` if nothing usable was
+        found on disk.
+    """
+    source = (row.get("source") or "").upper()
+    local_path = Path(row.get("local_path") or "")
+    if source == "ENA":
+        if local_path.exists():
+            return local_path.resolve()
+        return None
+    if source == "NCBI":
+        extracted_dir_str = row.get("extracted_dir") or ""
+        if extracted_dir_str:
+            extracted_dir = Path(extracted_dir_str)
+            if not extracted_dir.is_absolute():
+                extracted_dir = (data_root / extracted_dir).resolve()
+            candidates = list(extracted_dir.rglob("*_genomic.fna")) + list(
+                extracted_dir.rglob("*_genomic.fna.gz")
+            )
+            if candidates:
+                # Prefer the largest file (the assembly FASTA is the only
+                # large *_genomic.fna under the bundle).
+                candidates.sort(key=lambda p: p.stat().st_size, reverse=True)
+                return candidates[0].resolve()
+        if local_path.exists() and local_path.suffix in {".fna", ".fasta", ".gz"}:
+            return local_path.resolve()
+        return None
+    # Unknown source - fall back to whatever local_path was recorded.
+    if local_path.exists():
+        return local_path.resolve()
+    return None
+
+
+def cmd_extract_16S(
     manifest_path: Path,
     data_root: Path,
     *,
     overwrite: bool,
     accession_filter: list[str] | None,
+    threads: int,
+    kingdom: str,
+    evalue: float,
+    reject: float,
 ) -> int:
-    """Run ORF prediction for every eligible manifest row.
-
-    Args:
-        manifest_path: Phase 1 manifest path.
-        data_root: Root data directory (outputs land under ``data/orfs``).
-        overwrite: If True, re-run even when stamp matches.
-        accession_filter: If non-empty, restrict to these accessions.
+    """Run barrnap-based 16S extraction for every eligible MAG.
 
     Returns:
-        Process exit code (0 on success, non-zero if any row errored fatally).
+        Exit code: 0 on success, 1 if any MAG failed, 2 if barrnap is
+        missing from PATH (the user is shown a clear error).
     """
+    if not is_barrnap_available():
+        sys.stderr.write(
+            "[extract-16S] barrnap not found on PATH. "
+            "Install via conda-forge / bioconda before running Phase 2.\n"
+        )
+        return 2
+
     rows = _iter_assembly_rows(manifest_path, accession_filter)
-    output_dir = data_root / "orfs"
-    phase2_manifest = data_root / "phase2_manifest.tsv"
-    sys.stderr.write(f"[orf-predict] {len(rows)} assembly row(s) eligible\n")
-    new_rows: list[_Phase2Row] = []
+    ssu_dir = data_root / SSU_DIRNAME
+    routing_log_path = ssu_dir / ROUTING_LOG_FILENAME
+    phase_manifest = data_root / "phase2_manifest.tsv"
+
+    sys.stderr.write(
+        f"[extract-16S] {len(rows)} assembly row(s) eligible "
+        f"(barrnap kingdom={kingdom}, threads={threads})\n"
+    )
+
+    new_phase_rows: list[_PhaseRow] = []
+    routing_decisions = []
     failures = 0
     for row in rows:
         accession = row["accession"]
-        fasta_path = _resolve_genomic_fasta(row)
+        source = row.get("source", "")
+        fasta_path = _resolve_assembly_fasta(row, data_root)
         if fasta_path is None:
-            sys.stderr.write(f"  ! {accession}: genomic FASTA not found, skipping\n")
-            new_rows.append(
-                _Phase2Row(
+            sys.stderr.write(
+                f"  ! {accession}: could not resolve a FASTA on disk; skipping\n"
+            )
+            failures += 1
+            new_phase_rows.append(
+                _PhaseRow(
                     accession=accession,
-                    source=row.get("source", ""),
-                    stage="orf-predict",
+                    source=source,
+                    stage="extract-16S",
                     status="failed",
                     output_path="",
                     n_units=0,
                     elapsed_s=0.0,
                     completed_at=_utc_now(),
-                    note="genomic FASTA not located",
+                    note="FASTA not resolved on disk",
                 )
             )
-            failures += 1
             continue
         t0 = time.perf_counter()
         try:
-            result = predict_orfs(
+            assessment = assess_mag_for_ssu(
                 accession=accession,
                 fasta_path=fasta_path,
-                output_dir=output_dir,
+                output_dir=ssu_dir,
+                kingdom=kingdom,
+                threads=threads,
+                evalue=evalue,
+                reject=reject,
                 overwrite=overwrite,
             )
-        except Exception as exc:
+        except (BarrnapError, OSError) as exc:
             failures += 1
             elapsed = time.perf_counter() - t0
             sys.stderr.write(f"  ! {accession}: {exc}\n")
-            new_rows.append(
-                _Phase2Row(
+            new_phase_rows.append(
+                _PhaseRow(
                     accession=accession,
-                    source=row.get("source", ""),
-                    stage="orf-predict",
+                    source=source,
+                    stage="extract-16S",
                     status="failed",
                     output_path="",
                     n_units=0,
@@ -304,353 +316,160 @@ def cmd_orf_predict(
             )
             continue
         elapsed = time.perf_counter() - t0
-        marker = "=" if result.skipped else "+"
+        marker = "=" if assessment.skipped else "+"
         sys.stderr.write(
-            f"  {marker} {accession}: n_contigs={result.n_contigs} n_orfs={result.n_orfs} "
-            f"({elapsed:.1f}s)\n"
+            f"  {marker} {accession}: {assessment.n_16S_predicted} 16S record(s); "
+            f"decision={assessment.decision} ({elapsed:.1f}s)\n"
         )
-        new_rows.append(
-            _Phase2Row(
-                accession=accession,
-                source=row.get("source", ""),
-                stage="orf-predict",
-                status="skipped" if result.skipped else "ok",
-                output_path=str(result.faa_path),
-                n_units=result.n_orfs,
-                elapsed_s=elapsed,
-                completed_at=_utc_now(),
-                note=f"n_contigs={result.n_contigs}",
+        routing_decisions.append(
+            routing_decision_from_assessment(
+                assessment,
+                source=source,
+                notes="skipped (stamp matched)" if assessment.skipped else "",
             )
         )
-    _upsert_phase2_rows(phase2_manifest, new_rows)
+        new_phase_rows.append(
+            _PhaseRow(
+                accession=accession,
+                source=source,
+                stage="extract-16S",
+                status="skipped" if assessment.skipped else "ok",
+                output_path=str(assessment.ssu_fasta_path),
+                n_units=assessment.n_16S_predicted,
+                elapsed_s=elapsed,
+                completed_at=_utc_now(),
+                note=f"decision={assessment.decision}",
+            )
+        )
+
+    if routing_decisions:
+        upsert_routing_log(routing_log_path, routing_decisions)
+    _upsert_phase_rows(phase_manifest, new_phase_rows)
     return 1 if failures else 0
 
 
-def cmd_build_profiles(
-    data_root: Path,
-    config_dir: Path,
-    *,
-    overwrite: bool,
-) -> int:
-    """Build the 21 FaRLiP HMM profiles from JSC-1.
+def cmd_bundle_silva(data_root: Path) -> int:
+    """Concatenate per-MAG 16S FASTAs into the SILVA SINA input bundle."""
+    ssu_dir = data_root / SSU_DIRNAME
+    routing_log_path = ssu_dir / ROUTING_LOG_FILENAME
+    bundle_path = ssu_dir / SILVA_SINA_BUNDLE_FILENAME
+    phase_manifest = data_root / "phase2_manifest.tsv"
 
-    Args:
-        data_root: Root data directory.
-        config_dir: Directory containing ``farlip_genes.yaml``.
-        overwrite: If True, rebuild even when the HMM file exists.
-
-    Returns:
-        Process exit code (0 on success).
-    """
-    output_dir = data_root / "hmm_profiles"
-    phase2_manifest = data_root / "phase2_manifest.tsv"
-    jsc1_dir = (
-        data_root
-        / "references"
-        / REFERENCE_ACCESSION
-        / "ncbi_dataset"
-        / "data"
-        / REFERENCE_ACCESSION
-    )
-    gff_path = jsc1_dir / "genomic.gff"
-    faa_path = jsc1_dir / "protein.faa"
-    catalog_path = config_dir / "farlip_genes.yaml"
-
-    if not gff_path.exists() or not faa_path.exists():
+    if not routing_log_path.exists():
         sys.stderr.write(
-            f"[build-profiles] missing JSC-1 GFF or protein FASTA under {jsc1_dir}\n"
+            f"[bundle-silva] routing log missing at {routing_log_path}; "
+            "run extract-16S first.\n"
         )
         return 2
 
     t0 = time.perf_counter()
-    resolved = build_profiles(
-        catalog_path=catalog_path,
-        gff_path=gff_path,
-        protein_faa_path=faa_path,
-        output_dir=output_dir,
-        overwrite=overwrite,
-    )
+    result = bundle_silva_sina(routing_log_path, ssu_dir, bundle_path)
     elapsed = time.perf_counter() - t0
     sys.stderr.write(
-        f"[build-profiles] resolved {len(resolved)} catalog entries -> "
-        f"{output_dir / 'farlip_21.hmm'} ({elapsed:.1f}s)\n"
+        f"[bundle-silva] wrote {bundle_path} "
+        f"(MAGs included={result.n_mags_included}, "
+        f"records={result.n_records_total}, "
+        f"skipped={len(result.skipped_accessions)}) "
+        f"({elapsed:.1f}s)\n"
     )
-
-    _upsert_phase2_rows(
-        phase2_manifest,
+    _upsert_phase_rows(
+        phase_manifest,
         [
-            _Phase2Row(
-                accession=REFERENCE_ACCESSION,
-                source="JSC-1",
-                stage="build-profiles",
-                status="ok",
-                output_path=str(output_dir / "farlip_21.hmm"),
-                n_units=len(resolved),
-                elapsed_s=elapsed,
-                completed_at=_utc_now(),
-                note=f"{len([g for g in resolved if g.in_cluster])} of {len(resolved)} in cluster",
-            )
-        ],
-    )
-    return 0
-
-
-def cmd_search(
-    manifest_path: Path,
-    data_root: Path,
-    *,
-    overwrite: bool,
-    accession_filter: list[str] | None,
-) -> int:
-    """Run hmmsearch for every accession with an existing ``.faa``.
-
-    Args:
-        manifest_path: Phase 1 manifest path.
-        data_root: Root data directory.
-        overwrite: If True, re-run even when ``.domtblout`` exists.
-        accession_filter: If non-empty, restrict to these accessions.
-
-    Returns:
-        Process exit code (0 on success).
-    """
-    rows = _iter_assembly_rows(manifest_path, accession_filter)
-    orfs_dir = data_root / "orfs"
-    output_dir = data_root / "hmm_results"
-    hmm_path = data_root / "hmm_profiles" / "farlip_21.hmm"
-    phase2_manifest = data_root / "phase2_manifest.tsv"
-
-    if not hmm_path.exists():
-        sys.stderr.write(
-            f"[search] HMM file missing - run build-profiles first ({hmm_path})\n"
-        )
-        return 2
-
-    sys.stderr.write(f"[search] {len(rows)} assembly row(s) eligible\n")
-    new_rows: list[_Phase2Row] = []
-    failures = 0
-    for row in rows:
-        accession = row["accession"]
-        faa_path = orfs_dir / f"{accession}.faa"
-        if not faa_path.exists():
-            sys.stderr.write(
-                f"  ! {accession}: missing {faa_path.name} - run orf-predict first\n"
-            )
-            failures += 1
-            continue
-        t0 = time.perf_counter()
-        try:
-            result = run_search(
-                accession=accession,
-                faa_path=faa_path,
-                hmm_path=hmm_path,
-                output_dir=output_dir,
-                overwrite=overwrite,
-            )
-        except Exception as exc:
-            failures += 1
-            elapsed = time.perf_counter() - t0
-            sys.stderr.write(f"  ! {accession}: {exc}\n")
-            new_rows.append(
-                _Phase2Row(
-                    accession=accession,
-                    source=row.get("source", ""),
-                    stage="search",
-                    status="failed",
-                    output_path="",
-                    n_units=0,
-                    elapsed_s=elapsed,
-                    completed_at=_utc_now(),
-                    note=str(exc),
-                )
-            )
-            continue
-        elapsed = time.perf_counter() - t0
-        marker = "=" if result.skipped else "+"
-        sys.stderr.write(
-            f"  {marker} {accession}: hits={result.n_hits_reported} "
-            f"hmms_with_hits={result.n_hmms_with_hits} ({elapsed:.1f}s)\n"
-        )
-        new_rows.append(
-            _Phase2Row(
-                accession=accession,
-                source=row.get("source", ""),
-                stage="search",
-                status="skipped" if result.skipped else "ok",
-                output_path=str(result.domtblout_path),
-                n_units=result.n_hits_reported,
-                elapsed_s=elapsed,
-                completed_at=_utc_now(),
-                note=f"hmms_with_hits={result.n_hmms_with_hits}",
-            )
-        )
-    _upsert_phase2_rows(phase2_manifest, new_rows)
-    return 1 if failures else 0
-
-
-def cmd_parse_synteny(
-    manifest_path: Path,
-    data_root: Path,
-    *,
-    overwrite: bool,
-) -> int:
-    """Classify every MAG's HMM hits and write the two synteny reports.
-
-    Args:
-        manifest_path: Phase 1 manifest path.
-        data_root: Root data directory.
-        overwrite: Currently unused (the reports are always rewritten end-to-end -
-            the flag is accepted for CLI symmetry with the other subcommands).
-
-    Returns:
-        Process exit code (0 on success).
-    """
-    del overwrite
-    rows = _iter_assembly_rows(manifest_path, None)
-    orfs_dir = data_root / "orfs"
-    hmm_results_dir = data_root / "hmm_results"
-    report_path = data_root / "farlip_hits_report.tsv"
-    per_mag_path = data_root / "farlip_hits_per_mag.tsv"
-    phase2_manifest = data_root / "phase2_manifest.tsv"
-
-    sys.stderr.write(f"[parse-synteny] {len(rows)} assembly row(s) eligible\n")
-    all_calls = {}
-    new_rows: list[_Phase2Row] = []
-    for row in rows:
-        accession = row["accession"]
-        coords_path = orfs_dir / f"{accession}.coords.tsv"
-        domtblout_path = hmm_results_dir / f"{accession}.domtblout"
-        if not coords_path.exists() or not domtblout_path.exists():
-            sys.stderr.write(
-                f"  ! {accession}: missing coords or domtblout - skipping\n"
-            )
-            continue
-        t0 = time.perf_counter()
-        calls = classify_mag(accession, coords_path, domtblout_path)
-        elapsed = time.perf_counter() - t0
-        all_calls[accession] = calls
-        top = (
-            max(
-                (c.classification.value for c in calls),
-                key=lambda v: _CLASSIFICATION_DISPLAY_PRIORITY.get(v, -1),
-            )
-            if calls
-            else Classification.NONE.value
-        )
-        sys.stderr.write(
-            f"  + {accession}: candidate_contigs={len(calls)} top={top} ({elapsed:.2f}s)\n"
-        )
-        new_rows.append(
-            _Phase2Row(
-                accession=accession,
-                source=row.get("source", ""),
-                stage="parse-synteny",
-                status="ok",
-                output_path=str(report_path),
-                n_units=len(calls),
-                elapsed_s=elapsed,
-                completed_at=_utc_now(),
-                note=f"top_classification={top}",
-            )
-        )
-
-    write_reports(all_calls, report_path, per_mag_path)
-    sys.stderr.write(
-        f"[parse-synteny] wrote {report_path} and {per_mag_path}\n"
-    )
-    _upsert_phase2_rows(phase2_manifest, new_rows)
-    return 0
-
-
-def cmd_export_vault(
-    manifest_path: Path,
-    data_root: Path,
-    *,
-    overwrite: bool,
-) -> int:
-    """Render the Obsidian vault from the latest synteny reports.
-
-    Args:
-        manifest_path: Phase 1 manifest (read for scientific_name lookup).
-        data_root: Root data directory.
-        overwrite: Currently unused (the exporter always overwrites; flag kept for
-            CLI symmetry).
-
-    Returns:
-        Process exit code (0 on success).
-    """
-    del overwrite
-    report_path = data_root / "farlip_hits_report.tsv"
-    per_mag_path = data_root / "farlip_hits_per_mag.tsv"
-    vault_dir = data_root / "obsidian_export"
-    phase2_manifest = data_root / "phase2_manifest.tsv"
-
-    if not report_path.exists() or not per_mag_path.exists():
-        sys.stderr.write(
-            "[export-vault] synteny reports missing - run parse-synteny first\n"
-        )
-        return 2
-
-    t0 = time.perf_counter()
-    n_written = export_vault(report_path, per_mag_path, manifest_path, vault_dir)
-    elapsed = time.perf_counter() - t0
-    sys.stderr.write(
-        f"[export-vault] wrote {n_written} per-MAG markdown files + master index "
-        f"to {vault_dir} ({elapsed:.1f}s)\n"
-    )
-    _upsert_phase2_rows(
-        phase2_manifest,
-        [
-            _Phase2Row(
+            _PhaseRow(
                 accession="*",
-                source="export",
-                stage="export-vault",
+                source="SILVA",
+                stage="bundle-silva",
                 status="ok",
-                output_path=str(vault_dir),
-                n_units=n_written,
+                output_path=str(bundle_path),
+                n_units=result.n_records_total,
                 elapsed_s=elapsed,
                 completed_at=_utc_now(),
-                note="",
+                note=f"mags={result.n_mags_included}; "
+                f"skipped={len(result.skipped_accessions)}",
             )
         ],
     )
     return 0
 
 
-def cmd_status(manifest_path: Path, data_root: Path) -> int:
-    """Print a one-screen summary of pipeline state.
+def cmd_gen_gtdbtk_script(data_root: Path, *, threads: int) -> int:
+    """Render ``scripts/run_gtdbtk.sh`` for every GTDB-Tk-routed MAG."""
+    ssu_dir = data_root / SSU_DIRNAME
+    routing_log_path = ssu_dir / ROUTING_LOG_FILENAME
+    script_path = REPO_ROOT / GTDBTK_SCRIPT_RELPATH
+    phase_manifest = data_root / "phase2_manifest.tsv"
 
-    Args:
-        manifest_path: Phase 1 manifest.
-        data_root: Root data directory.
+    if not routing_log_path.exists():
+        sys.stderr.write(
+            f"[gen-gtdbtk-script] routing log missing at {routing_log_path}; "
+            "run extract-16S first.\n"
+        )
+        return 2
 
-    Returns:
-        Always 0.
-    """
-    rows = _iter_assembly_rows(manifest_path, None)
-    orfs_dir = data_root / "orfs"
-    hmm_results_dir = data_root / "hmm_results"
-    hmm_path = data_root / "hmm_profiles" / "farlip_21.hmm"
-    report_path = data_root / "farlip_hits_report.tsv"
-    vault_dir = data_root / "obsidian_export"
-
-    n_with_orfs = sum(
-        1 for r in rows if (orfs_dir / f"{r['accession']}.faa").exists()
+    t0 = time.perf_counter()
+    result = generate_gtdbtk_script(
+        routing_log_path=routing_log_path,
+        data_root=data_root,
+        script_path=script_path,
+        threads=threads,
     )
-    n_with_hits = sum(
-        1
-        for r in rows
-        if (hmm_results_dir / f"{r['accession']}.domtblout").exists()
+    elapsed = time.perf_counter() - t0
+    sys.stderr.write(
+        f"[gen-gtdbtk-script] wrote {result.script_path} "
+        f"(MAGs={result.n_assemblies}, skipped={len(result.skipped_accessions)}) "
+        f"({elapsed:.1f}s)\n"
     )
+    if result.skipped_accessions:
+        sys.stderr.write(
+            "  ! skipped (FASTA missing on disk): "
+            + ", ".join(result.skipped_accessions[:5])
+            + ("..." if len(result.skipped_accessions) > 5 else "")
+            + "\n"
+        )
+    _upsert_phase_rows(
+        phase_manifest,
+        [
+            _PhaseRow(
+                accession="*",
+                source="GTDB",
+                stage="gen-gtdbtk-script",
+                status="ok",
+                output_path=str(result.script_path),
+                n_units=result.n_assemblies,
+                elapsed_s=elapsed,
+                completed_at=_utc_now(),
+                note=f"batchfile={result.batchfile_path}; "
+                f"skipped={len(result.skipped_accessions)}",
+            )
+        ],
+    )
+    return 0
+
+
+def cmd_status(data_root: Path) -> int:
+    """Print a one-screen summary of Phase 2 state."""
+    ssu_dir = data_root / SSU_DIRNAME
+    routing_log_path = ssu_dir / ROUTING_LOG_FILENAME
+    bundle_path = ssu_dir / SILVA_SINA_BUNDLE_FILENAME
+    script_path = REPO_ROOT / GTDBTK_SCRIPT_RELPATH
+
+    rows = read_routing_log(routing_log_path)
+    silva_count = sum(1 for r in rows if r.get("decision") == SSU_DECISION_SILVA)
+    gtdbtk_count = sum(1 for r in rows if r.get("decision") == SSU_DECISION_GTDBTK)
 
     sys.stdout.write(
         "FaRLiP Phase 2 status\n"
-        f"  assembly rows in manifest : {len(rows)}\n"
-        f"  ORFs predicted (.faa)      : {n_with_orfs}\n"
-        f"  hmmsearch outputs          : {n_with_hits}\n"
-        f"  farlip_21.hmm present      : {'yes' if hmm_path.exists() else 'no'}\n"
-        f"  synteny report present     : {'yes' if report_path.exists() else 'no'}\n"
-        f"  Obsidian vault populated   : "
-        f"{'yes' if vault_dir.exists() and any(vault_dir.iterdir()) else 'no'}\n"
+        f"  routing log               : "
+        f"{'present' if routing_log_path.exists() else 'absent'} "
+        f"({routing_log_path})\n"
+        f"  routed -> SILVA           : {silva_count}\n"
+        f"  routed -> GTDB-Tk         : {gtdbtk_count}\n"
+        f"  silva_sina_input.fasta    : "
+        f"{'present' if bundle_path.exists() else 'absent'}\n"
+        f"  scripts/run_gtdbtk.sh     : "
+        f"{'present' if script_path.exists() else 'absent'}\n"
+        f"  barrnap on PATH           : "
+        f"{'yes' if is_barrnap_available() else 'no'}\n"
     )
     return 0
 
@@ -674,12 +493,6 @@ def _build_parser() -> argparse.ArgumentParser:
         default=DEFAULT_DATA_ROOT,
         help=f"Data root directory (default: {DEFAULT_DATA_ROOT})",
     )
-    p.add_argument(
-        "--config-dir",
-        type=Path,
-        default=DEFAULT_CONFIG_DIR,
-        help=f"Config directory (default: {DEFAULT_CONFIG_DIR})",
-    )
     sub = p.add_subparsers(dest="cmd", required=True)
 
     common_filter = argparse.ArgumentParser(add_help=False)
@@ -693,92 +506,114 @@ def _build_parser() -> argparse.ArgumentParser:
     common_overwrite.add_argument(
         "--overwrite",
         action="store_true",
-        help="Force re-run even when outputs already exist.",
+        help="Force re-run even when the stamp matches.",
+    )
+
+    barrnap_args = argparse.ArgumentParser(add_help=False)
+    barrnap_args.add_argument(
+        "--threads",
+        type=int,
+        default=BARRNAP_DEFAULT_THREADS,
+        help=f"Threads for barrnap (default: {BARRNAP_DEFAULT_THREADS}).",
+    )
+    barrnap_args.add_argument(
+        "--kingdom",
+        choices=("bac", "arc", "euk", "mito"),
+        default=BARRNAP_KINGDOM_BACTERIA,
+        help="Kingdom passed to barrnap (default: bac).",
+    )
+    barrnap_args.add_argument(
+        "--evalue",
+        type=float,
+        default=BARRNAP_DEFAULT_EVALUE,
+        help=f"barrnap --evalue (default: {BARRNAP_DEFAULT_EVALUE:g}).",
+    )
+    barrnap_args.add_argument(
+        "--reject",
+        type=float,
+        default=BARRNAP_DEFAULT_REJECT,
+        help=f"barrnap --reject (default: {BARRNAP_DEFAULT_REJECT:g}).",
     )
 
     sub.add_parser(
-        "orf-predict",
-        parents=[common_overwrite, common_filter],
-        help="Run pyrodigal meta-mode ORF prediction for every assembly row.",
+        "extract-16S",
+        parents=[common_overwrite, common_filter, barrnap_args],
+        help="Run barrnap on every eligible assembly + write the routing log.",
     )
     sub.add_parser(
-        "build-profiles",
-        parents=[common_overwrite],
-        help="Build the 21 FaRLiP HMM profiles from JSC-1.",
+        "bundle-silva",
+        help="Concatenate per-MAG 16S FASTAs into silva_sina_input.fasta.",
     )
-    sub.add_parser(
-        "search",
-        parents=[common_overwrite, common_filter],
-        help="Run hmmsearch for every per-MAG protein set.",
+    gtdb_p = sub.add_parser(
+        "gen-gtdbtk-script",
+        help="Render scripts/run_gtdbtk.sh for every GTDB-Tk-routed MAG.",
     )
-    sub.add_parser(
-        "parse-synteny",
-        parents=[common_overwrite],
-        help="Classify hits with the FaRLiP synteny rule and write reports.",
-    )
-    sub.add_parser(
-        "export-vault",
-        parents=[common_overwrite],
-        help="Render the Obsidian vault from the synteny reports.",
+    gtdb_p.add_argument(
+        "--threads",
+        type=int,
+        default=GTDBTK_THREADS_DEFAULT,
+        help=f"Threads for `gtdbtk classify_wf` (default: {GTDBTK_THREADS_DEFAULT}).",
     )
     sub.add_parser(
         "all",
-        parents=[common_overwrite],
-        help="Run orf-predict -> build-profiles -> search -> parse-synteny -> export-vault.",
+        parents=[common_overwrite, barrnap_args],
+        help="Run extract-16S -> bundle-silva -> gen-gtdbtk-script.",
     )
     sub.add_parser(
         "status",
-        help="Print a one-screen summary of Phase 2 progress.",
+        help="One-screen summary of Phase 2 state.",
     )
     return p
 
 
 def main(argv: list[str] | None = None) -> int:
-    """Entry point for ``python -m src.pipeline_phase2``.
-
-    Args:
-        argv: Override for sys.argv[1:] (used by tests).
-
-    Returns:
-        Process exit code.
-    """
+    """Entry point for ``python -m src.pipeline_phase2``."""
     args = _build_parser().parse_args(argv)
     manifest_path: Path = args.manifest
     data_root: Path = args.data_root
-    config_dir: Path = args.config_dir
 
     cmd = args.cmd
     accession_filter = getattr(args, "accession", None) or None
     overwrite = bool(getattr(args, "overwrite", False))
+    threads = int(getattr(args, "threads", BARRNAP_DEFAULT_THREADS))
+    kingdom = getattr(args, "kingdom", BARRNAP_KINGDOM_BACTERIA)
+    evalue = float(getattr(args, "evalue", BARRNAP_DEFAULT_EVALUE))
+    reject = float(getattr(args, "reject", BARRNAP_DEFAULT_REJECT))
 
-    if cmd == "orf-predict":
-        return cmd_orf_predict(
-            manifest_path, data_root, overwrite=overwrite, accession_filter=accession_filter
+    if cmd == "extract-16S":
+        return cmd_extract_16S(
+            manifest_path,
+            data_root,
+            overwrite=overwrite,
+            accession_filter=accession_filter,
+            threads=threads,
+            kingdom=kingdom,
+            evalue=evalue,
+            reject=reject,
         )
-    if cmd == "build-profiles":
-        return cmd_build_profiles(data_root, config_dir, overwrite=overwrite)
-    if cmd == "search":
-        return cmd_search(
-            manifest_path, data_root, overwrite=overwrite, accession_filter=accession_filter
-        )
-    if cmd == "parse-synteny":
-        return cmd_parse_synteny(manifest_path, data_root, overwrite=overwrite)
-    if cmd == "export-vault":
-        return cmd_export_vault(manifest_path, data_root, overwrite=overwrite)
+    if cmd == "bundle-silva":
+        return cmd_bundle_silva(data_root)
+    if cmd == "gen-gtdbtk-script":
+        return cmd_gen_gtdbtk_script(data_root, threads=threads)
     if cmd == "all":
-        for step in (
-            lambda: cmd_orf_predict(manifest_path, data_root, overwrite=overwrite, accession_filter=None),
-            lambda: cmd_build_profiles(data_root, config_dir, overwrite=overwrite),
-            lambda: cmd_search(manifest_path, data_root, overwrite=overwrite, accession_filter=None),
-            lambda: cmd_parse_synteny(manifest_path, data_root, overwrite=overwrite),
-            lambda: cmd_export_vault(manifest_path, data_root, overwrite=overwrite),
-        ):
-            rc = step()
-            if rc != 0:
-                return rc
-        return 0
+        rc = cmd_extract_16S(
+            manifest_path,
+            data_root,
+            overwrite=overwrite,
+            accession_filter=None,
+            threads=threads,
+            kingdom=kingdom,
+            evalue=evalue,
+            reject=reject,
+        )
+        if rc != 0:
+            return rc
+        rc = cmd_bundle_silva(data_root)
+        if rc != 0:
+            return rc
+        return cmd_gen_gtdbtk_script(data_root, threads=GTDBTK_THREADS_DEFAULT)
     if cmd == "status":
-        return cmd_status(manifest_path, data_root)
+        return cmd_status(data_root)
     sys.stderr.write(f"unknown command: {cmd}\n")
     return 2
 

@@ -13,16 +13,16 @@ writes a smaller, assignment-shaped vault under ``data/extremophile_vault/``:
 
 The exporter is fed by:
 
-* ``data/qc_filtered_mags.tsv`` - the Phase 3 ``recommended_for_phylogeny``
+* ``data/qc_filtered_mags.tsv`` - the Phase 4 ``recommended_for_phylogeny``
   view (MIMAG HIGH or MEDIUM **and** at least one FaRLiP candidate contig).
   Schema: :data:`src.qc_reporter.REPORT_COLUMNS`.
-* ``data/ssu/routing_log.tsv`` (optional) - the Phase 1.5 routing decisions.
+* ``data/ssu/routing_log.tsv`` (optional) - the Phase 2 routing decisions.
   When present, ``Taxonomic_Placement`` is filled with a stable placeholder
   string indicating which downstream tool the MAG is queued for
   (``"SILVA SINA: pending"`` / ``"GTDB-Tk: pending"``); when absent, it is
   left empty so a grader/Obsidian user can fill it in by hand.
 * ``data/farlip_hits_per_mag.tsv`` (optional) - used in the body of each
-  per-MAG note to surface the Phase 2 top classification, but the
+  per-MAG note to surface the Phase 3 top classification, but the
   ``FaRLiP_Cluster_Present`` frontmatter slot stays blank by design.
 
 Idempotent: per-MAG markdown is overwritten on every call, the master index
@@ -45,7 +45,7 @@ VAULT_DIRNAME: str = "extremophile_vault"
 """Default subdirectory under ``data/`` that this exporter writes into."""
 
 MASTER_INDEX_FILENAME: str = "High_Quality_Extremophile_Genomes.md"
-"""Exact master-index filename mandated by the Phase 1.5 / Task 4 spec."""
+"""Exact master-index filename mandated by the Task 4 spec."""
 
 FRONTMATTER_KEYS: tuple[str, ...] = (
     "Accession",
@@ -65,7 +65,7 @@ The actual species-level placement lands when the user runs SINA on the
 PLACEMENT_PENDING_GTDBTK: str = "GTDB-Tk: pending"
 """Placeholder ``Taxonomic_Placement`` value for GTDB-Tk-routed MAGs.
 Replaced once ``scripts/run_gtdbtk.sh`` has been executed and the user runs
-``ingest-gtdbtk`` (a future Phase 1.5 follow-up)."""
+``ingest-gtdbtk`` (a future Phase 2 follow-up)."""
 
 PLACEMENT_UNKNOWN: str = ""
 """Placeholder ``Taxonomic_Placement`` value when no routing log exists
@@ -149,7 +149,7 @@ def _safe_int(value: str) -> int:
 
 
 def _placement_for_decision(decision: str) -> str:
-    """Map a Phase 1.5 routing decision to a ``Taxonomic_Placement`` value."""
+    """Map a Phase 2 routing decision to a ``Taxonomic_Placement`` value."""
     if decision == SSU_DECISION_SILVA:
         return PLACEMENT_PENDING_SILVA
     if decision == SSU_DECISION_GTDBTK:
@@ -160,7 +160,7 @@ def _placement_for_decision(decision: str) -> str:
 def _build_placement_lookup(
     routing_log_path: Path | None,
 ) -> dict[str, str]:
-    """Read the Phase 1.5 routing log and return a ``{accession: placement}`` map.
+    """Read the Phase 2 routing log and return a ``{accession: placement}`` map.
 
     Args:
         routing_log_path: Path to ``data/ssu/routing_log.tsv``; ``None``
@@ -227,7 +227,7 @@ def _format_mag_markdown(
     """Build the markdown body for one extremophile MAG note.
 
     Frontmatter is exactly the five mandated keys; the body adds a small
-    context block (scientific name, QC tier, Phase 2 top classification)
+    context block (scientific name, QC tier, Phase 3 top classification)
     so the file is useful when read inside Obsidian without leaving the
     note. ``FaRLiP_Cluster_Present`` is deliberately left blank in the
     frontmatter - the user fills it in during manual review.
@@ -252,10 +252,10 @@ def _format_mag_markdown(
         f"# {mag.accession}",
         "",
         (
-            "High-quality extremophile MAG that passed the Phase 3 "
+            "High-quality extremophile MAG that passed the Phase 4 "
             "`recommended_for_phylogeny` gate "
             "(MIMAG HIGH/MEDIUM completeness/contamination + at least one "
-            "Phase 2 FaRLiP candidate contig)."
+            "Phase 3 FaRLiP candidate contig)."
         ),
         "",
         "## Quality summary",
@@ -273,7 +273,7 @@ def _format_mag_markdown(
             "## FaRLiP context",
             "",
             (
-                f"- **Phase 2 top classification:** "
+                f"- **Phase 3 top classification:** "
                 f"`{mag.farlip_top_classification or 'NONE'}`"
             ),
             (
@@ -282,14 +282,14 @@ def _format_mag_markdown(
             ),
             "",
             "Set `FaRLiP_Cluster_Present` in the frontmatter to `true` or "
-            "`false` after manual review of the Phase 2 vault note "
+            "`false` after manual review of the Phase 3 vault note "
             f"`[[{mag.accession}]]` (located in `data/obsidian_export/`).",
             "",
             "## Taxonomic placement",
             "",
             (
                 f"`{placement}`" if placement
-                else "_No Phase 1.5 routing decision recorded for this MAG._"
+                else "_No Phase 2 routing decision recorded for this MAG._"
             ),
             "",
             "## See also",
@@ -325,9 +325,9 @@ def _format_master_index(
         (
             f"Auto-generated by `src/extremophile_vault_exporter.py`. "
             f"Lists every MAG in `data/qc_filtered_mags.tsv` - i.e. every "
-            f"assembly that satisfied the Phase 3 "
+            f"assembly that satisfied the Phase 4 "
             f"`recommended_for_phylogeny` gate (MIMAG HIGH or MEDIUM "
-            f"completeness/contamination + at least one Phase 2 FaRLiP "
+            f"completeness/contamination + at least one Phase 3 FaRLiP "
             f"candidate contig)."
         ),
         "",
@@ -406,7 +406,7 @@ def export_extremophile_vault(
 def list_filtered_accessions(filtered_csv_path: Path) -> list[str]:
     """Convenience helper - return just the accessions in the filtered TSV.
 
-    Used by the Phase 3 CLI to print a one-line summary after the export.
+    Used by the Phase 4 CLI to print a one-line summary after the export.
 
     Args:
         filtered_csv_path: Path to ``data/qc_filtered_mags.tsv``.

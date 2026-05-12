@@ -33,7 +33,7 @@ _FILTERED_HEADER = (
 
 
 def _write_filtered(path: Path, rows: list[str]) -> None:
-    """Write a Phase 3 ``qc_filtered_mags.tsv`` fixture."""
+    """Write a Phase 4 ``qc_filtered_mags.tsv`` fixture."""
     path.write_text(_FILTERED_HEADER + "\n".join(rows) + "\n", encoding="utf-8")
 
 

@@ -1,4 +1,4 @@
-"""In-process genome-quality assessor for Phase 3.
+"""In-process genome-quality assessor for Phase 4.
 
 Scans every per-MAG protein FASTA (``data/orfs/<accession>.faa`` written by
 :mod:`src.orf_predictor`) against the bacterial single-copy ortholog (SCO)
@@ -48,7 +48,7 @@ QC_HMM_DOMAIN_EVALUE_THRESHOLD: float = 1e-10
 
 QC_HMM_CPU_COUNT: int = max(1, (os.cpu_count() or 2) - 1)
 """Number of worker threads handed to ``pyhmmer.hmmsearch`` per MAG. Matches the
-Phase 2 default so the QC sweep does not contend with whatever else is running
+Phase 3 default so the QC sweep does not contend with whatever else is running
 on the dev box."""
 
 MIMAG_HIGH_QUALITY_COMPLETENESS: float = 90.0

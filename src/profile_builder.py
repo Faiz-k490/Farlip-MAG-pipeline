@@ -1,12 +1,12 @@
 """Build HMM profiles for the 21 canonical FaRLiP genes from JSC-1.
 
-For Phase 2 iteration 1 we have a single FaRLiP anchor (Leptolyngbya sp. JSC-1,
+For Phase 3 iteration 1 we have a single FaRLiP anchor (Leptolyngbya sp. JSC-1,
 RefSeq assembly GCF_000733415.1). With one sequence per gene we cannot run a
 multiple-sequence alignment, so each HMM is built from a one-row "MSA" containing
 just that sequence. This produces a reasonable starting profile thanks to pyhmmer's
 default position-specific priors; sensitivity for highly divergent paralogs will
 improve once the secondary anchor (Chlorogloeopsis fritschii PCC 9212) is integrated
-in Phase 2.1.
+in Phase 3.1.
 
 Resolution priority for each catalog entry (highest first):
 

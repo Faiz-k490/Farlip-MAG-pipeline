@@ -29,7 +29,7 @@ from pathlib import Path
 
 
 SYNTENY_WINDOW_BP: int = 10_000
-"""Sliding-window size for the **candidate trigger** (Phase 2 spec). A contig is
+"""Sliding-window size for the **candidate trigger** (Phase 3 spec). A contig is
 a FaRLiP candidate only if some 10 kb window contains
 :data:`MIN_MARKERS_FOR_CANDIDATE`+ distinct HMM names. Tight by design - this
 filters out chromosome-wide scattered paralog hits."""
@@ -49,7 +49,7 @@ count distinct HMM names for the ``n_markers`` field."""
 
 EDGE_PROXIMITY_BP: int = 2_000
 """Distance from either contig end inside which a marker triggers the
-``EDGE_TRUNCATED`` flag (Phase 2 spec)."""
+``EDGE_TRUNCATED`` flag (Phase 3 spec)."""
 
 FULL_CLUSTER_MARKER_THRESHOLD: int = 15
 """Markers (distinct HMMs) required inside the densest :data:`CLUSTER_SPAN_BP`
@@ -261,7 +261,7 @@ def _best_window_indices(
 
 
 def _classify(n_distinct: int, edge_truncated: bool) -> Classification:
-    """Apply the classification ladder defined in the Phase 2 plan.
+    """Apply the classification ladder defined in the Phase 3 plan.
 
     Args:
         n_distinct: Number of distinct FaRLiP marker HMMs on this contig.

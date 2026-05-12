@@ -1,4 +1,4 @@
-"""Phase 1.5 SILVA SINA bundle + routing log writer.
+"""Phase 2 SILVA SINA bundle + routing log writer.
 
 Two responsibilities:
 
@@ -102,7 +102,7 @@ def routing_decision_from_assessment(
     source: str = "",
     notes: str = "",
 ) -> RoutingDecision:
-    """Build a :class:`RoutingDecision` from a Phase 1.5 SSU assessment.
+    """Build a :class:`RoutingDecision` from a Phase 2 SSU assessment.
 
     The ``output_path`` field is set to the per-MAG 16S FASTA for SILVA-routed
     MAGs and to the input assembly FASTA otherwise; the GTDB-Tk script
@@ -135,7 +135,7 @@ def routing_decision_from_assessment(
 
 
 def write_routing_log(rows: Iterable[RoutingDecision], path: Path) -> int:
-    """Write or rewrite the Phase 1.5 routing log.
+    """Write or rewrite the Phase 2 routing log.
 
     The log is overwritten each call (not appended) so the contents always
     reflect the *current* state of ``data/ssu/``. Callers who need to merge

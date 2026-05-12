@@ -1,4 +1,4 @@
-"""Marker-HMM fetcher for the Phase 3 quality assessor.
+"""Marker-HMM fetcher for the Phase 4 quality assessor.
 
 Fetches the bacterial single-copy ortholog (SCO) marker HMM set declared in
 [`config/qc_markers.yaml`](../config/qc_markers.yaml), verifies the upstream
@@ -28,7 +28,7 @@ Outputs:
   :mod:`src.qc_assessor`.
 * ``data/qc_markers/<label>.stamp`` - tiny key/value file recording the source
   URL, the SHA-256 of the concatenated HMM file, and the marker count, used by
-  the assessor and the Phase 3 manifest writer.
+  the assessor and the Phase 4 manifest writer.
 * One row in ``data/manifest.tsv`` keyed on ``(accession=label, url)``.
 """
 
