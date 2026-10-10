@@ -103,8 +103,9 @@ def stream_download(
         url: HTTPS URL to fetch.
         dest: Final on-disk path. Parent directories are created if missing.
         expected_md5: Optional hex MD5 to verify against. Mismatch raises FetchError.
-        overwrite: If False and ``dest`` already exists with a non-zero size, skip the
-            download and just hash the existing file.
+        overwrite: If False and ``dest`` already exists with a non-zero size, hash
+            and verify the existing file. A checksum mismatch raises FetchError;
+            use overwrite=True to replace the cached file.
         show_progress: Display a tqdm progress bar.
         headers: Extra HTTP headers to merge into the request.
         max_retries: How many times to retry transient errors before giving up.
@@ -118,7 +119,23 @@ def stream_download(
     """
     dest.parent.mkdir(parents=True, exist_ok=True)
     if not overwrite and dest.exists() and dest.stat().st_size > 0:
-        return compute_sha256(dest), dest.stat().st_size
+        if expected_md5 is None:
+            return compute_sha256(dest), dest.stat().st_size
+        sha = hashlib.sha256()
+        md5 = hashlib.md5()
+        bytes_read = 0
+        with dest.open("rb") as fh:
+            for chunk in iter(lambda: fh.read(DEFAULT_CHUNK_SIZE), b""):
+                sha.update(chunk)
+                md5.update(chunk)
+                bytes_read += len(chunk)
+        got, want = md5.hexdigest().lower(), expected_md5.lower()
+        if got != want:
+            raise FetchError(
+                f"MD5 mismatch for cached file {dest}: expected {want}, got {got}; "
+                "use overwrite=True to download it again"
+            )
+        return sha.hexdigest(), bytes_read
 
     part = dest.with_name(dest.name + ".part")
     request_headers = {"User-Agent": USER_AGENT}
